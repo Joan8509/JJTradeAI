@@ -1,0 +1,54 @@
+ticker;optimal_low;optimal_high;minimum;maximum;analysis_date;block;sector;industry;exchange;name
+AMZN;140;230;130;240;2026-05-19;TECHNOLOGY;Consumer Cyclical;Internet Retail;NASD;Amazon.com Inc.
+AAPL;35;90;30;100;2026-05-19;TECHNOLOGY;Technology;Consumer Electronics;NASD;Apple Inc.
+GOOG;60;170;50;170;2026-05-19;TECHNOLOGY;Communication Services;Internet Content & Information;NASD;Alphabet Inc.
+META;150;210;145;220;2026-05-19;TECHNOLOGY;Communication Services;Internet Content & Information;NASD;Meta Platforms Inc.
+MSFT;60;120;50;130;2026-05-19;TECHNOLOGY;Technology;Software - Infrastructure;NASD;Microsoft Corporation
+NFLX;40;80;35;85;2026-05-19;TECHNOLOGY;Communication Services;Entertainment;NASD;Netflix Inc.
+TSLA;100;250;90;250;2026-05-19;TECHNOLOGY;Consumer Cyclical;Auto Manufacturers;NASD;Tesla Inc.
+PLTR;140;300;135;310;2026-05-19;TECHNOLOGY;Technology;Software - Infrastructure;NASD;Palantir Technologies Inc.
+IBM;115;220;110;230;2026-06-10;TECHNOLOGY;Information;Technology Services;NYSE;International Business Machines Corp
+ORCL;80;130;70;140;2026-05-19;TECHNOLOGY;Technology;Software - Infrastructure;NASD;Oracle Corp
+NOW;62;87;55;95;2026-07-13;TECHNOLOGY;Technology;Software - Application;NYSE;ServiceNow
+AMD;150;235;140;240;2026-05-19;SEMICONDUCTORS;Technology;Semiconductors;NASD;Advanced Micro Devices Inc.
+MU;400;600;400;650;2026-05-19;SEMICONDUCTORS;Technology;Semiconductors;NASD;Micron Technology Inc.
+NVDA;80;170;75;175;2026-02-17;SEMICONDUCTORS;Technology;Semiconductors;NASD;NVIDIA Corporation
+QCOM;80;160;70;170;2026-05-19;SEMICONDUCTORS;Technology;Semiconductors;NASD;Qualcomm Inc.
+AVGO;70;140;65;145;2026-05-19;SEMICONDUCTORS;Technology;Semiconductors;NASD;Broadcom Inc.
+INTC;50;80;45;85;2026-06-10;SEMICONDUCTORS;Technology;Semiconductors;NASD;Intel Corp
+SOXL;150;240;120;250;2026-05-19;SEMICONDUCTORS;Technology;Semiconductors;NASD;Direxion Daily Semiconductor Bull 3X Shares
+DASH;160;240;155;245;2026-05-19;SOFTWARE - APP;Communication Services;Internet Content & Information;NYSE;DoorDash Inc.
+LYFT;25;50;25;55;2026-05-19;SOFTWARE - APP;Technology;Software - Application;NASD;Lyft Inc.
+UBER;35;60;30;65;2026-05-19;SOFTWARE - APP;Technology;Software - Application;NYSE;Uber Technologies Inc.
+HD;120;240;120;240;2026-05-19;CONSUMER;Consumer Cyclical;Home Improvement Retail;NYSE;The Home Depot Inc.
+LOW;120;220;110;225;2026-05-19;CONSUMER;Consumer Cyclical;Home Improvement Retail;NYSE;Lowe's Companies Inc.
+WMT;60;110;55;115;2026-02-17;CONSUMER;Consumer Defensive;Discount Stores;NYSE;Walmart Inc.
+DIA;100;200;95;210;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NYSE;SPDR Dow Jones Industrial Average ETF Trust
+QQQ;35;55;30;60;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NASD;Invesco QQQ Trust
+SPY;30;45;25;50;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NYSE;SPDR S&P 500 ETF Trust
+SPX;400;600;380;620;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NYSE;SPDR S&P 500 ETF Trust
+IWM;40;70;35;70;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NYSE;iShares Russell 2000 ETF
+TNA;40;90;40;100;2026-05-19;INDEX - USA;Financial;Exchange Traded Fund;NYSE;Direxion Daily Small Cap Bull 3X Shares
+AXP;85;190;80;195;2026-05-19;CARDS;Financial;Credit Services;NYSE;American Express Company
+C;50;140;45;150;2026-05-19;CARDS;Financial;Credit Services;NYSE;Citigroup Inc.
+MA;90;175;85;180;2026-05-19;CARDS;Financial;Credit Services;NYSE;Mastercard Incorporated
+PYPL;50;80;40;90;2026-05-19;CARDS;Financial;Credit Services;NASD;PayPal Holdings Inc.
+V;60;170;55;175;2026-05-19;CARDS;Financial;Credit Services;NYSE;Visa Inc.
+BABA;40;60;40;70;2026-05-19;CHINA;Consumer Cyclical;Internet Retail;NYSE;Alibaba Group Holding Limited
+LI;25;60;25;70;2026-05-19;CHINA;Consumer Cyclical;Auto Manufacturers;NASD;Li Auto Inc.
+NIO;30;75;25;75;2026-05-19;CHINA;Consumer Cyclical;Auto Manufacturers;NYSE;NIO Inc.
+XPEV;50;70;45;75;2026-05-19;CHINA;Consumer Cyclical;Auto Manufacturers;NYSE;XPeng Inc.
+GLD;40;80;40;90;2026-05-19;COMMODITY;Financial;Closed-End Fund - Equity;NYSE;The GDL Fund
+SLV;40;75;35;80;2026-05-19;COMMODITY;Financial;Exchange Traded Fund;NYSE;iShares Silver Trust
+USO;50;80;45;90;2026-05-19;COMMODITY;Financial;Exchange Traded Fund;NYSE;United States Oil Fund LP
+COIN;200;300;195;310;2026-05-19;FINANCIAL / DATA;Financial;Financial Data & Stock Exchanges;NASD;Coinbase Global Inc.
+HOOD;100;150;90;160;2026-05-19;FINANCIAL / DATA;Financial;Financial Data & Stock Exchanges;NASD;Robinhood Markets Inc.
+CVS;60;120;55;130;2026-05-19;HEALTHCARE;Healthcare;Healthcare Plans;NYSE;CVS Health Corporation
+MRNA;50;130;50;130;2026-05-19;HEALTHCARE;Healthcare;Biotechnology;NASD;Moderna Inc.
+PFE;30;70;25;75;2026-05-19;HEALTHCARE;Healthcare;Drug Manufacturers - General;NYSE;Pfizer Inc.
+BA;60;170;50;180;2026-05-19;INDUSTRIALS;Industrials;Aerospace & Defense;NYSE;The Boeing Company
+URA;55;80;55;85;2026-05-19;NUCLEAR ENERGY;Financial;Exchange Traded Fund;NYSE;Global X Uranium ETF
+CCL;40;60;35;65;2026-05-19;CRUISES;Consumer Cyclical;Travel Services;NYSE;Carnival Corporation & plc
+RCL;80;150;75;155;2026-05-19;CRUISES;Consumer Cyclical;Travel Services;NYSE;Royal Caribbean Cruises Ltd.
+AAL;40;70;30;70;2026-05-19;AERONAUTICAL;Industrials;Airlines;NYSE;American Airlines Group Inc.
+DAL;40;65;35;70;2026-05-19;AERONAUTICAL;Consumer Cyclical;Travel Services;NYSE;Delta Air Lines Inc.

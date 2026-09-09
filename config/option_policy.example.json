@@ -1,0 +1,14 @@
+{
+  "option_feed": null,
+  "max_search_dte": null,
+  "max_spread_absolute": null,
+  "max_spread_pct": null,
+  "max_spot_strike_distance_pct": null,
+  "min_days_to_expiration": null,
+  "max_position_cost": null,
+  "min_bid_size": null,
+  "min_ask_size": null,
+  "min_delta": null,
+  "max_delta": null,
+  "max_results": null
+}
