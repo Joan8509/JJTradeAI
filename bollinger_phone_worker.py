@@ -143,7 +143,7 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
             try:
                 signal['ma_context'] = live_context(database, symbol, provider, feed, source_time, signal)
             except (ValueError, KeyError, OSError, sqlite3.Error):
-                signal['ma_context'] = {'state':'SIN_DATOS','ma_type':'SMA','provisional':True}
+                signal['ma_context'] = {'state':'SIN_DATOS','ma_type':'SMA','provisional':False}
         state_payload = {"symbol": symbol, "provider": provider, "feed": feed,
                          "version": STRATEGY_VERSION,
                          "source_timestamp": source_time.isoformat(), "checked_at": now.isoformat(),

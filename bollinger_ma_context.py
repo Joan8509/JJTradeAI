@@ -16,7 +16,7 @@ def context_from_bars(bars, *, price, side, available_at, ma_type='SMA'):
     # Filter before aggregating: future intraday values cannot enter a daily close.
     known=bars[pd.to_datetime(bars['date'],utc=True)+pd.Timedelta(minutes=1)<=available]
     if known.empty:
-        return {'state':'SIN_DATOS','ma_type':ma_type,'provisional':True,'frames':[], 'nearest_ahead':None}
+        return {'state':'SIN_DATOS','ma_type':ma_type,'provisional':False,'frames':[], 'nearest_ahead':None}
     datasets={tf:aggregate_minute_bars(known,tf) for tf in ('1H','1D')}
     return context_from_aggregates(datasets,price=price,side=side,available_at=available,ma_type=ma_type)
 
@@ -57,11 +57,11 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
         frames.append({'timeframe':timeframe,'closed_bars':len(closed),'last_closed_at':str(closed.iloc[-1]['date']) if len(closed) else None,
                        'averages':values,'slopes':slopes,'pairs':pairs})
     ahead=[l for l in levels if l['ahead']]
-    return {'state':'DESCRIPTIVO' if levels else 'SIN_DATOS','ma_type':ma_type,'provisional':True,
+    return {'state':'DESCRIPTIVO' if levels else 'SIN_DATOS','ma_type':ma_type,'provisional':False,
             'available_at':available.isoformat(),'price':price,'frames':frames,'levels':levels,
             'nearest_ahead':min(ahead,key=lambda l:l['distance_pct']) if ahead else None,
             'complete':all(f['averages']['200'] is not None for f in frames),
-            'caveat':'Calculado con barras recibidas; no certifica cobertura completa. Una media por delante no demuestra bloqueo. SMA provisional, pendiente confirmar la clase.'}
+            'caveat':'Calculado con barras recibidas; no certifica cobertura completa. Una media por delante no demuestra bloqueo. SMA confirmada por Joan en TC2000.'}
 
 
 @lru_cache(maxsize=40)
@@ -81,14 +81,14 @@ def live_context(database, symbol, provider, feed, source_time, signal):
     key=((available-pd.Timedelta(minutes=30)).floor('h')+pd.Timedelta(minutes=30)).isoformat()
     data=_history(str(database),symbol,provider,feed,key)
     if data is None:
-        return {'state':'SIN_DATOS','ma_type':'SMA','provisional':True,'frames':[],'nearest_ahead':None}
+        return {'state':'SIN_DATOS','ma_type':'SMA','provisional':False,'frames':[],'nearest_ahead':None}
     return context_from_aggregates(data,price=signal['price'],side=signal['side'],available_at=available)
 
 
 def context_text(context):
     if not context or context.get('state')!='DESCRIPTIVO':
         return 'Medias Hora/Diario: contexto no disponible.'
-    lines=['Medias SMA provisionales · Hora/Diario:']
+    lines=['Medias SMA · Hora/Diario:']
     for frame in context['frames']:
         pairs=frame['pairs']
         lines.append(f"{frame['timeframe']}: orden 20/40 {pairs[0]['direction'].lower()} · 100/200 {pairs[1]['direction'].lower()}.")

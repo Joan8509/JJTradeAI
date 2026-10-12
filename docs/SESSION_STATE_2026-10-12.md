@@ -75,3 +75,6 @@ Scripts reproducibles: `scripts/analyze_tsla_weak_exits.py` y
 ## Actualizacion posterior: contexto de medias incorporado
 Se incorporo contexto descriptivo SMA provisional de 20/40 y 100/200 en Hora y Diario, usando solo velas cerradas, a nuevos avisos Telegram, eventos y tarjetas Streamlit. La clase no confirma SMA/EMA; debe aclararse. No se activaron filtros por medias ni supresion de salidas debiles. Ver docs/BOLLINGER_MA_CONTEXT.md. Nuevo playback multicompanias y contexto en exports/bollinger_playback/runway_20261012_221738/. Pasaron 95 pruebas y se reinicio el radar para cargar el cambio.
 
+
+Confirmacion de Joan: las medias de TC2000 son SMA. Se mantienen calculadas desde Alpaca/IEX. No se modifican periodos ni filtros.
+

@@ -24,6 +24,5 @@ no causales ni validadas fuera de muestra:
 - Media por delante a >=0,50%: 523 casos, avance medio 0,0896%.
 - No se encontró ventaja clara de alinear simplemente el orden de pares.
 
-Antes de filtros, desglosar por compañía, dirección y periodo, comprobar los
-tipos de medias con Joan y validar prospectivamente. El filtro de salidas débiles
+Antes de filtros, desglosar por compañía, dirección y periodo, validar prospectivamente. El filtro de salidas débiles
 continúa en simulación; no se activó ejecución.
