@@ -1,0 +1,159 @@
+{
+  "source": "exports\\bollinger_playback\\runway_20261012_221738\\report.json",
+  "definition": "Maximum favorable minute-close advance from reconstructed alert until first adverse minute close, reentry or same 15m candle end. If no adverse close before candle end, window is censored at that end; intraminute reversals unavailable.",
+  "summary": [
+    {
+      "symbol": "TODAS",
+      "cases": 1181,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.0769686465630569,
+      "no_advance_pct": 49.195596951735816,
+      "positive_cases": 600,
+      "positive_only_mean_pct": 0.151499952651617
+    },
+    {
+      "symbol": "AAPL",
+      "cases": 96,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.07130240119645863,
+      "no_advance_pct": 53.125,
+      "positive_cases": 45,
+      "positive_only_mean_pct": 0.15211178921911175
+    },
+    {
+      "symbol": "NVDA",
+      "cases": 77,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.08450853786270332,
+      "no_advance_pct": 38.96103896103896,
+      "positive_cases": 47,
+      "positive_only_mean_pct": 0.13845015777506714
+    },
+    {
+      "symbol": "TSLA",
+      "cases": 101,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.12066633419406557,
+      "no_advance_pct": 51.48514851485149,
+      "positive_cases": 49,
+      "positive_only_mean_pct": 0.24872040313470659
+    },
+    {
+      "symbol": "AMD",
+      "cases": 68,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.11116341081198353,
+      "no_advance_pct": 55.88235294117647,
+      "positive_cases": 30,
+      "positive_only_mean_pct": 0.25197039784049596
+    },
+    {
+      "symbol": "META",
+      "cases": 97,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.13414875037102045,
+      "no_advance_pct": 47.422680412371136,
+      "positive_cases": 51,
+      "positive_only_mean_pct": 0.25514566247037224
+    },
+    {
+      "symbol": "MSFT",
+      "cases": 110,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.05533651308501313,
+      "no_advance_pct": 55.45454545454545,
+      "positive_cases": 49,
+      "positive_only_mean_pct": 0.12422482529288661
+    },
+    {
+      "symbol": "BABA",
+      "cases": 50,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.06431259080317564,
+      "no_advance_pct": 52.0,
+      "positive_cases": 24,
+      "positive_only_mean_pct": 0.13398456417328258
+    },
+    {
+      "symbol": "SPY",
+      "cases": 70,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.022858852059663187,
+      "no_advance_pct": 52.857142857142854,
+      "positive_cases": 33,
+      "positive_only_mean_pct": 0.04848847406595222
+    },
+    {
+      "symbol": "QQQ",
+      "cases": 75,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.05410526514261645,
+      "no_advance_pct": 41.333333333333336,
+      "positive_cases": 44,
+      "positive_only_mean_pct": 0.0922248837658235
+    },
+    {
+      "symbol": "IWM",
+      "cases": 70,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.03430449223058653,
+      "no_advance_pct": 35.714285714285715,
+      "positive_cases": 45,
+      "positive_only_mean_pct": 0.053362543469801266
+    },
+    {
+      "symbol": "DIA",
+      "cases": 29,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.021308660883434527,
+      "no_advance_pct": 51.724137931034484,
+      "positive_cases": 14,
+      "positive_only_mean_pct": 0.04413936897282866
+    },
+    {
+      "symbol": "MU",
+      "cases": 85,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.10241314465562618,
+      "no_advance_pct": 57.64705882352941,
+      "positive_cases": 36,
+      "positive_only_mean_pct": 0.24180881377022848
+    },
+    {
+      "symbol": "NIO",
+      "cases": 35,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.06632737374077038,
+      "no_advance_pct": 77.14285714285714,
+      "positive_cases": 8,
+      "positive_only_mean_pct": 0.29018226011587045
+    },
+    {
+      "symbol": "GLD",
+      "cases": 46,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.056118992508572114,
+      "no_advance_pct": 36.95652173913044,
+      "positive_cases": 29,
+      "positive_only_mean_pct": 0.08901633294463164
+    },
+    {
+      "symbol": "AMZN",
+      "cases": 94,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.07669649691722673,
+      "no_advance_pct": 48.93617021276596,
+      "positive_cases": 48,
+      "positive_only_mean_pct": 0.15019730646290233
+    },
+    {
+      "symbol": "NFLX",
+      "cases": 78,
+      "minimum_pct": 0.0,
+      "mean_pct": 0.07681406810852777,
+      "no_advance_pct": 38.46153846153846,
+      "positive_cases": 48,
+      "positive_only_mean_pct": 0.12482286067635762
+    }
+  ]
+}

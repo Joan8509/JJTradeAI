@@ -1381,6 +1381,9 @@ def render_bollinger_dashboard() -> None:
         with st.container(border=True):
             st.markdown(f"**{item['symbol']} · {direction} · Salida en formación**")
             st.write(f"Disipador {signal['side'].lower()} · Precio observado: {signal['price']:.2f}")
+            if signal.get('ma_context'):
+                from bollinger_ma_context import context_text
+                st.caption(context_text(signal['ma_context']))
             st.caption("Barra: " + _market_event_local_time(item["source_timestamp"]) + ". Revisa el gráfico: esta salida puede revertirse.")
     with st.expander("Compañías y estado del radar"):
         latest = {item["symbol"]: item for item in states}

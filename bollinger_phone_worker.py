@@ -16,6 +16,7 @@ from live_market import aggregate_minute_bars
 from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore
 from market_calendar import MarketSessionRepository
 from telegram_alerts import CONFIG_PATH, TelegramError, connection, send_message
+from bollinger_ma_context import live_context, context_text
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
@@ -106,6 +107,7 @@ def message_for(symbol, signal, source_time):
             f"Salida {direction} por el disipador {signal['side'].lower()}.\n"
             f"Ambas bandas se abren y el punto medio acompaña.\n"
             f"Precio observado: {signal['price']:.2f} · Barra: {local:%I:%M %p} ET\n"
+            f"{context_text(signal.get('ma_context'))}\n"
             "AVISO TEMPRANO: vela en formación o recién cerrada; puede revertirse.\n"
             "Revisa tu gráfico. No es una aprobación de entrada.")
 
@@ -137,6 +139,11 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
             continue
         observed += 1
         signal = detect_exit(prepare_market_frame(aggregate_minute_bars(bars, "15m")))
+        if signal is not None:
+            try:
+                signal['ma_context'] = live_context(database, symbol, provider, feed, source_time, signal)
+            except (ValueError, KeyError, OSError, sqlite3.Error):
+                signal['ma_context'] = {'state':'SIN_DATOS','ma_type':'SMA','provisional':True}
         state_payload = {"symbol": symbol, "provider": provider, "feed": feed,
                          "version": STRATEGY_VERSION,
                          "source_timestamp": source_time.isoformat(), "checked_at": now.isoformat(),
