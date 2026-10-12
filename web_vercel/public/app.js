@@ -2,6 +2,17 @@ let snapshot=null;
 const byId=id=>document.getElementById(id);
 const time=value=>value?new Date(value).toLocaleString('es',{timeZone:'America/New_York'})+' ET':'Sin registro';
 function textNode(tag,text){const node=document.createElement(tag);node.textContent=text;return node;}
+function renderMedias(card,context){
+ if(!context?.frames)return;
+ const details=document.createElement('details');details.append(textNode('summary','Medias SMA de Hora y Diario'));
+ for(const frame of context.frames){for(const pair of frame.pairs||[]){
+  const state=pair.validated?`${pair.sessions_since_cross} sesiones desde el cruce`:'Tendencia pendiente de validar';
+  details.append(textNode('p',`${frame.timeframe} ${pair.periods.join('/')} · ${pair.direction} · ${state}`));
+ }}
+ for(const level of context.levels||[])details.append(textNode('p',`${level.timeframe} SMA${level.period}: ${level.value.toFixed(2)} · distancia ${level.distance_pct.toFixed(3)}% · ${(level.role||'Contexto pendiente').replaceAll('_',' ').toLowerCase()}`));
+ details.append(textNode('p','Posibles pisos, techos y continuidad; no garantizan recorrido ni aprueban una entrada.'));
+ card.append(details);
+}
 function renderResults(){
  const table=byId('results');table.replaceChildren();if(!snapshot)return;
  const study=snapshot.study;
@@ -19,7 +30,7 @@ function render(data){
  if(data.local_preview)byId('notice').textContent='VISTA LOCAL DE REVISIÓN · todavía depende de tu PC. '+byId('notice').textContent;
  const signals=byId('signals');signals.replaceChildren();
  const active=data.radar_healthy?data.current.filter(item=>item.signal):[];
- for(const item of active){const card=document.createElement('article');card.className='signal'+(item.signal.side==='INFERIOR'?' down':'');card.append(textNode('strong',`${item.symbol} · ${item.signal.side==='SUPERIOR'?'ALCISTA / CALL':'BAJISTA / PUT'} · En formación`),textNode('p',`Precio observado: ${item.signal.price.toFixed(2)} · ${time(item.source_timestamp)}`));signals.append(card);}
+ for(const item of active){const card=document.createElement('article');card.className='signal'+(item.signal.side==='INFERIOR'?' down':'');card.append(textNode('strong',`${item.symbol} · ${item.signal.side==='SUPERIOR'?'ALCISTA / CALL':'BAJISTA / PUT'} · En formación`),textNode('p',`Precio observado: ${item.signal.price.toFixed(2)} · ${time(item.source_timestamp)}`));renderMedias(card,item.signal.ma_context);signals.append(card);}
  if(!active.length)signals.append(textNode('p',data.market_open?'Sin salidas vigentes que cumplan la regla.':'No hay señales activas fuera de la sesión regular.'));
  const history=byId('history');history.replaceChildren();for(const item of data.events.slice(0,15))history.append(textNode('p',`${item.symbol} · ${item.side} · ${time(item.detected_at)} · observación guardada`));
  byId('updated').textContent='Consulta: '+time(data.generated_at);renderResults();

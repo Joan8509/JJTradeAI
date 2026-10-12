@@ -1384,6 +1384,26 @@ def render_bollinger_dashboard() -> None:
             if signal.get('ma_context'):
                 from bollinger_ma_context import context_text
                 st.caption(context_text(signal['ma_context']))
+                with st.expander('Ver medias, cruces y cierres de Hora'):
+                    context = signal['ma_context']
+                    pairs = []
+                    for frame in context.get('frames', []):
+                        for pair in frame.get('pairs', []):
+                            pairs.append({'Temporalidad':frame['timeframe'], 'Par':'/'.join(map(str,pair['periods'])),
+                                          'Orden':pair['direction'], 'Sesiones desde cruce':pair.get('sessions_since_cross'),
+                                          'Estado':pair.get('phase'), 'Separación %':pair.get('separation_pct'),
+                                          'Cruces últimas 20 velas':pair.get('crosses_last_20')})
+                    if pairs:
+                        st.dataframe(pd.DataFrame(pairs), hide_index=True, width='stretch')
+                    levels = [{'Temporalidad':level['timeframe'], 'SMA':level['period'], 'Valor':level['value'],
+                               'Distancia %':level['distance_pct'], 'Papel':level.get('role'),
+                               'Delante del movimiento':level['ahead'], 'Último cierre de Hora':level.get('hour_confirmation'),
+                               'Hora de la observación':level.get('confirmation_hour_at'),
+                               'Contactos separados últimas 20 horas':level.get('touch_episodes_last_20_hours')}
+                              for level in context.get('levels', [])]
+                    if levels:
+                        st.dataframe(pd.DataFrame(levels), hide_index=True, width='stretch')
+                    st.caption('Un cierre observado de Hora corresponde a la hora indicada; no confirma la salida actual de 15 minutos. Los contactos y la separación se miden, pero todavía no tienen umbrales validados para bloquear avisos.')
             st.caption("Barra: " + _market_event_local_time(item["source_timestamp"]) + ". Revisa el gráfico: esta salida puede revertirse.")
     with st.expander("Compañías y estado del radar"):
         latest = {item["symbol"]: item for item in states}

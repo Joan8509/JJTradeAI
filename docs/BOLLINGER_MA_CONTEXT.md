@@ -1,28 +1,48 @@
-# Medias como contexto de Bollinger
+# Medias SMA en la estrategia Bollinger
 
-El radar incorpora pares 20/40 y 100/200 en Hora y Diario como contexto,
-no como aprobación ni filtro de notificaciones. SMA provisional: la documentación
-de la clase no especifica SMA/EMA. No presentar la elección como regla del mentor.
+SMA 20/40 y 100/200 confirmadas por Joan en TC2000. Calculadas localmente
+con barras Alpaca/IEX en Hora y Diario; no hay API TC2000.
 
-Solo velas anteriores cerradas: se excluyen la hora en formación y el día actual.
-Se registran orden de pares, pendientes, ubicación del precio y distancia desde
-el precio del aviso a cada media disponible. Se muestra la más cercana por delante.
-Orden alcista/bajista no verifica todavía los dos días desde el cruce exigidos
-por la clase. Una media por delante no demuestra bloqueo; ausencia de medias
-por delante no demuestra camino libre. Historial insuficiente se indica;
-las barras recibidas pueden contener huecos, no se certifica cobertura completa.
+## Reglas implementadas
 
-Integración: eventos nuevos, estado del radar, mensajes nuevos de Telegram y
-tarjetas Streamlit. Eventos históricos no se sobrescriben. Detector v3 sin cambios.
-El frontend Vercel no está publicado ni muestra todavía este contexto.
+- Orden de pares, pendiente individual, posicion y separacion porcentual.
+- Ultimo cruce observado, sesiones desde cruce y fase. Se requieren dos
+  transiciones entre sesiones presentes despues del cruce para validar tendencia.
+  Sin cruce observado, no se valida. Corto: 2 a menos de 5; medio: 5 a 15;
+  largo: mas de 15. No certifica continuidad de datos ni calendario completo.
+- Cruces en las ultimas 20 velas como medicion, sin umbral de lateralidad.
+- Papel segun tendencia validada y direccion de aproximacion: posible piso,
+  techo, continuidad alcista/bajista o media por detras. Una media por delante
+  en tendencia favorable puede ser continuidad y no un bloqueo.
+- Distancia al precio del aviso y siguiente posible piso/techo. Peso relativo
+  20 < 40 < 100 < 200 registrado, sin probabilidades ni puntajes arbitrarios.
+- Contacto exacto con el rango de la ultima vela de Hora cerrada y cierre
+  direccional distinguen rebote, rechazo y ruptura observados. Se usa la media
+  conocida antes de esa hora, tambien para las diarias. Se muestra fecha;
+  una observacion historica no confirma la nueva salida de Bollinger.
+- Episodios de contacto en ultimas 20 horas para medias horarias. Contactos
+  consecutivos cuentan como uno; no se afirma automaticamente debilitamiento.
 
-`scripts/analyze_ma_context_playback.py` anotó los 1181 eventos del estudio
-congelado de recorrido. Asociaciones descriptivas mezclando símbolos y direcciones,
-no causales ni validadas fuera de muestra:
-- Media por delante a <0,10%: 101 casos, avance medio al primer retroceso 0,0449%.
-- Media por delante a 0,10–0,50%: 277 casos, avance medio 0,0667%.
-- Media por delante a >=0,50%: 523 casos, avance medio 0,0896%.
-- No se encontró ventaja clara de alinear simplemente el orden de pares.
+Solo velas cerradas, sin cierre futuro. Datos insuficientes se indican.
+Las barras recibidas pueden contener huecos; no se certifica cobertura completa.
 
-Antes de filtros, desglosar por compañía, dirección y periodo, validar prospectivamente. El filtro de salidas débiles
-continúa en simulación; no se activó ejecución.
+## Integracion
+
+Nuevos avisos Telegram, eventos guardados y tarjetas Streamlit con detalle
+expandible de cruces, medias y cierres de Hora. Frontend Vercel preparado
+incluye contexto, pero no esta publicado. Detector v3 permanece igual;
+no se activa aprobacion de entrada ni supresion por medias/salidas debiles.
+
+## Pendientes de validacion
+
+La clase no define tolerancia de toque, separacion minima saludable, umbral
+para cruces repetidos, debilitamiento por rebotes ni espacio minimo. Se miden
+sin inventar limites. Conteo de contactos diarios, rebotes efectivos y peso
+comparativo del primer acercamiento requieren un estudio independiente.
+
+## Evidencia
+
+El estudio geometrico previo de 1181 eventos no valida este nuevo clasificador.
+Media por delante a <0,10%: 101 casos, avance medio inicial 0,0449%; >=0,50%:
+523 casos, 0,0896%. Asociaciones agregadas, no causas ni certeza demostrada.
+Antes de filtros, estudiar por compania, direccion y periodo y validar en vivo.

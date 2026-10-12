@@ -78,3 +78,7 @@ Se incorporo contexto descriptivo SMA provisional de 20/40 y 100/200 en Hora y D
 
 Confirmacion de Joan: las medias de TC2000 son SMA. Se mantienen calculadas desde Alpaca/IEX. No se modifican periodos ni filtros.
 
+
+## Reglas de medias implementadas posteriormente
+Se implementaron cruces observados y dos transiciones de sesiones para validar tendencia; fases, separacion y conteo de cruces; posibles pisos/techos/continuidad segun direccion; contacto y cierre direccional de ultima Hora con media conocida antes de abrir; episodios de contacto horario. Dashboard incluye detalle y Vercel preparado muestra medias. Tolerancias, lateralidad, debilitamiento y espacio minimo quedan pendientes de validacion, no se inventaron filtros. Pasaron 100 pruebas. Ver docs/BOLLINGER_MA_CONTEXT.md.
+

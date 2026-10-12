@@ -5,6 +5,7 @@ import math
 import pandas as pd
 from live_market import aggregate_minute_bars
 from market_store import MarketBarStore
+from moving_average_rules import pair_history, level_role, hour_confirmation, touch_episodes
 
 PERIODS=(20,40,100,200)
 
@@ -28,6 +29,9 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
     local_date=available.tz_convert('America/New_York').date()
     frames=[]
     levels=[]
+    hourly=datasets['1H'].copy()
+    hourly=hourly[pd.to_datetime(hourly.date,utc=True)+pd.Timedelta(hours=1)<=available]
+    latest_hour=hourly.iloc[-1] if len(hourly) else None
     for timeframe in ('1H','1D'):
         data=datasets[timeframe]
         dates=pd.to_datetime(data['date'],utc=True)
@@ -37,8 +41,10 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
         closes=closed['close'].astype(float)
         values={}
         slopes={}
+        series={}
         for period in PERIODS:
             ma=closes.rolling(period,min_periods=period).mean() if ma_type=='SMA' else closes.ewm(span=period,adjust=False,min_periods=period).mean()
+            series[period]=ma
             value=float(ma.iloc[-1]) if len(ma) and pd.notna(ma.iloc[-1]) else None
             previous=float(ma.iloc[-2]) if len(ma)>1 and pd.notna(ma.iloc[-2]) else None
             values[str(period)]=value
@@ -52,14 +58,39 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
             a,b=values[str(fast)],values[str(slow)]
             direction='SIN_DATOS' if a is None or b is None else 'ALCISTA' if a>b else 'BAJISTA' if a<b else 'IGUALES'
             location='SIN_DATOS' if a is None or b is None else 'POR_ENCIMA' if price>max(a,b) else 'POR_DEBAJO' if price<min(a,b) else 'ENTRE_MEDIAS'
-            pairs.append({'periods':[fast,slow],'direction':direction,'price_location':location,
+            history=pair_history(series[fast],series[slow],closed['date'])
+            pairs.append({'periods':[fast,slow],'direction':direction,'price_location':location,**history,
                           'aligned':direction==('ALCISTA' if side=='SUPERIOR' else 'BAJISTA') if direction in ('ALCISTA','BAJISTA') else None})
+        for level in [l for l in levels if l['timeframe']==timeframe]:
+            pair=pairs[0 if level['period'] in (20,40) else 1]
+            level['role']=level_role(pair['direction'],pair['validated'],level['value'],price,side)
+            level['relative_weight']=level['period']
+            period=level['period']
+            reference=None
+            if timeframe=='1H':
+                previous_ma=series[period].shift(1)
+                reference=float(previous_ma.iloc[-1]) if len(previous_ma) and pd.notna(previous_ma.iloc[-1]) else None
+                level['touch_episodes_last_20_hours']=touch_episodes(closed,previous_ma)
+            elif latest_hour is not None:
+                hour_date=pd.Timestamp(latest_hour['date']).tz_convert('America/New_York').date()
+                before_hour=closed[pd.to_datetime(closed.date,utc=True).dt.tz_convert('America/New_York').dt.date<hour_date]['close'].astype(float)
+                past_ma=before_hour.rolling(period,min_periods=period).mean() if ma_type=='SMA' else before_hour.ewm(span=period,adjust=False,min_periods=period).mean()
+                reference=float(past_ma.iloc[-1]) if len(past_ma) and pd.notna(past_ma.iloc[-1]) else None
+                level['touch_episodes_last_20_hours']=None
+            level['hour_confirmation']=hour_confirmation(latest_hour,reference) if latest_hour is not None else 'SIN_DATOS'
+            level['confirmation_reference']=reference
+            level['confirmation_hour_at']=str(latest_hour['date']) if latest_hour is not None else None
         frames.append({'timeframe':timeframe,'closed_bars':len(closed),'last_closed_at':str(closed.iloc[-1]['date']) if len(closed) else None,
                        'averages':values,'slopes':slopes,'pairs':pairs})
     ahead=[l for l in levels if l['ahead']]
+    potential_limits=[l for l in ahead if l['role'] in ('POSIBLE_PISO','POSIBLE_TECHO')]
+    unknown=[l for l in ahead if l['role']=='TENDENCIA_NO_VALIDADA']
     return {'state':'DESCRIPTIVO' if levels else 'SIN_DATOS','ma_type':ma_type,'provisional':False,
             'available_at':available.isoformat(),'price':price,'frames':frames,'levels':levels,
             'nearest_ahead':min(ahead,key=lambda l:l['distance_pct']) if ahead else None,
+            'nearest_possible_limit':min(potential_limits,key=lambda l:l['distance_pct']) if potential_limits else None,
+            'assessment':'POSIBLE_LIMITE_POR_DELANTE' if potential_limits else 'TENDENCIA_PENDIENTE' if unknown else 'SIN_LIMITE_IDENTIFICADO',
+            'pending_rules':['Tolerancia de contacto','Separación saludable','Umbral de cruces para lateralidad','Debilitamiento por rebotes','Espacio mínimo'],
             'complete':all(f['averages']['200'] is not None for f in frames),
             'caveat':'Calculado con barras recibidas; no certifica cobertura completa. Una media por delante no demuestra bloqueo. SMA confirmada por Joan en TC2000.'}
 
@@ -92,11 +123,25 @@ def context_text(context):
     for frame in context['frames']:
         pairs=frame['pairs']
         lines.append(f"{frame['timeframe']}: orden 20/40 {pairs[0]['direction'].lower()} · 100/200 {pairs[1]['direction'].lower()}.")
+        for pair in pairs:
+            periods='/'.join(map(str,pair['periods']))
+            if pair.get('validated'):
+                lines.append(f"{frame['timeframe']} {periods}: {pair['sessions_since_cross']} sesiones desde el cruce, {pair['phase'].lower().replace('_',' ')}.")
+            else:
+                lines.append(f"{frame['timeframe']} {periods}: tendencia aún no validada desde el cruce.")
     nearest=context.get('nearest_ahead')
     if nearest:
         lines.append(f"Media por delante: {nearest['timeframe']} {nearest['period']} a {nearest['value']:.2f} ({nearest['distance_pct']:.3f}%). Posible zona a revisar.")
+        roles={'POSIBLE_PISO':'posible piso','POSIBLE_TECHO':'posible techo','POSIBLE_CONTINUIDAD_ALCISTA':'posible continuidad alcista','POSIBLE_CONTINUIDAD_BAJISTA':'posible continuidad bajista','TENDENCIA_NO_VALIDADA':'papel pendiente: tendencia no validada'}
+        lines.append('Lectura: '+roles.get(nearest.get('role'),'revisar contexto')+'.')
     else:
         lines.append('Sin medias por delante entre las disponibles; no significa camino libre.')
+    limit=context.get('nearest_possible_limit')
+    if limit and (not nearest or (limit['timeframe'],limit['period'])!=(nearest['timeframe'],nearest['period'])):
+        lines.append(f"Otro posible límite: {limit['timeframe']} SMA{limit['period']} a {limit['distance_pct']:.3f}%.")
+    if nearest and nearest.get('hour_confirmation') not in (None,'SIN_DATOS','SIN_CONTACTO'):
+        stamp=pd.Timestamp(nearest['confirmation_hour_at']).tz_convert('America/New_York')
+        lines.append(f"Última vela de Hora cerrada ({stamp:%m/%d %H:%M} ET): {nearest['hour_confirmation'].lower().replace('_',' ')}.")
     if not context.get('complete'):
         lines.append('Historial insuficiente para algunas medias, incluida la diaria de 200.')
     lines.append('Contexto descriptivo con barras recibidas; no confirma rebote ni ruptura.')
