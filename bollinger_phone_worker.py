@@ -106,13 +106,10 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
 def message_for(symbol, signal, source_time):
     direction = "alcista" if signal["side"] == "SUPERIOR" else "bajista"
     local = source_time.astimezone(ZoneInfo("America/New_York"))
-    exposure=signal.get('exposure_pct_bandwidth')
-    exposure_text='' if exposure is None else f"Exposición: {exposure:.2f}% del ancho de Bollinger"+(' · pequeña, revisar continuidad.' if signal.get('small_exposure') else '.')+'\n'
     return (f"🔔 {symbol} · Bollinger 15 minutos\n"
             f"Salida {direction} por el disipador {signal['side'].lower()}.\n"
             f"Ambas bandas se abren y el punto medio acompaña.\n"
             f"Precio observado: {signal['price']:.2f} · Barra: {local:%I:%M %p} ET\n"
-            f"{exposure_text}"
             f"{context_text(signal.get('ma_context'))}\n"
             "AVISO TEMPRANO: vela en formación o recién cerrada; puede revertirse.\n"
             "Revisa tu gráfico. No es una aprobación de entrada.")
@@ -150,6 +147,9 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
                 signal['ma_context'] = live_context(database, symbol, provider, feed, source_time, signal)
             except (ValueError, KeyError, OSError, sqlite3.Error):
                 signal['ma_context'] = {'state':'SIN_DATOS','ma_type':'SMA','provisional':False}
+        if signal is not None:
+            from bollinger_pattern_memory import historical_support
+            signal['historical_support'] = historical_support(symbol, provider, feed, source_time, signal)
         state_payload = {"symbol": symbol, "provider": provider, "feed": feed,
                          "version": STRATEGY_VERSION,
                          "source_timestamp": source_time.isoformat(), "checked_at": now.isoformat(),

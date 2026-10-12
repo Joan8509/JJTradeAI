@@ -67,3 +67,7 @@ Reproducción: `scripts/research_bollinger_filters.py` seguido de
 `scripts/review_bollinger_filters.py`. No cambian alertas automáticamente.
 Próximo paso: contrastar en sesiones nuevas y por dirección/compañía, sin
 optimizar umbrales con unos pocos ejemplos favorables.
+
+
+## Ajuste solicitado: playback silencioso
+Se elimina la nueva comparacion de filtros del dashboard y la nueva linea de exposicion de Telegram y tarjetas. Las mediciones siguen internas. El radar ahora registra historical_support junto al evento, sin cambiar ni retrasar las notificaciones. Una memoria compacta de 2026 resultados completos compara misma compania, direccion, proveedor/feed, fase de sesion y rango de exposicion; excluye resultados todavia no conocidos y ventanas solapadas. Requiere 20 casos y cinco fechas para mostrar internamente una frecuencia descriptiva. No estima una probabilidad calibrada, no aprende ajustes automaticamente y no considera ciclos una garantia. Esta primera memoria NO empareja SMA/barreras: el estudio de esos factores sigue separado y no valido un filtro universal. Actualizar memoria requiere ejecutar scripts/build_bollinger_pattern_memory.py despues de un playback nuevo; no es una actualizacion continua automatica.

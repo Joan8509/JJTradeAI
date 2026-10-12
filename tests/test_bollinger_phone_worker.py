@@ -30,8 +30,8 @@ class BollingerPhoneTests(unittest.TestCase):
             self.assertTrue(signal['small_exposure'])
             self.assertAlmostEqual(signal['exposure_pct_bandwidth'],.02/6*100)
             text=message_for('TEST',signal,datetime(2026,10,12,14,0,tzinfo=timezone.utc))
-            self.assertIn('Exposición:',text)
-            self.assertIn('pequeña',text)
+            self.assertIn('TEST',text)
+            self.assertNotIn('ancho de Bollinger',text)
 
     def test_gap_opening_outside_bands_is_excluded_in_both_directions(self):
         for side, opening in (("SUPERIOR", 104), ("INFERIOR", 96)):
