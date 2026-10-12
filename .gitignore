@@ -50,3 +50,6 @@ exports/web_review/
 
 # Local recovery copies
 backups/
+
+# Large raw filter playback; verified compressed copy is retained
+exports/bollinger_playback/filters_*/report.json

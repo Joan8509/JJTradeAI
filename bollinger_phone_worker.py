@@ -67,7 +67,10 @@ def detect_exit(prepared):
                          opening=latest.get("open"), opening_upper=opening_upper, opening_lower=opening_lower)
     if side is None:
         return None
-    return {"side": side, "price": float(latest.close), "candle": pd.Timestamp(latest["date"]).isoformat()}
+    distance=float(latest.close-latest.bollinger_upper) if side=='SUPERIOR' else float(latest.bollinger_lower-latest.close)
+    exposure=distance/float(latest.bollinger_upper-latest.bollinger_lower)*100
+    return {"side": side, "price": float(latest.close), "candle": pd.Timestamp(latest["date"]).isoformat(),
+            "exposure_pct_bandwidth":exposure,"small_exposure":exposure<1}
 
 
 def bands_at_open(prior_closes, opening):
@@ -103,10 +106,13 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
 def message_for(symbol, signal, source_time):
     direction = "alcista" if signal["side"] == "SUPERIOR" else "bajista"
     local = source_time.astimezone(ZoneInfo("America/New_York"))
+    exposure=signal.get('exposure_pct_bandwidth')
+    exposure_text='' if exposure is None else f"Exposición: {exposure:.2f}% del ancho de Bollinger"+(' · pequeña, revisar continuidad.' if signal.get('small_exposure') else '.')+'\n'
     return (f"🔔 {symbol} · Bollinger 15 minutos\n"
             f"Salida {direction} por el disipador {signal['side'].lower()}.\n"
             f"Ambas bandas se abren y el punto medio acompaña.\n"
             f"Precio observado: {signal['price']:.2f} · Barra: {local:%I:%M %p} ET\n"
+            f"{exposure_text}"
             f"{context_text(signal.get('ma_context'))}\n"
             "AVISO TEMPRANO: vela en formación o recién cerrada; puede revertirse.\n"
             "Revisa tu gráfico. No es una aprobación de entrada.")

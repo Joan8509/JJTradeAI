@@ -21,6 +21,18 @@ class BollingerPhoneTests(unittest.TestCase):
         for side in ("SUPERIOR", "INFERIOR"):
             self.assertEqual(detect_exit(self.frame(side))["side"], side)
 
+    def test_small_exposure_is_measured_without_suppressing_early_alert(self):
+        for side,price in (('SUPERIOR',103.02),('INFERIOR',96.98)):
+            frame=self.frame(side)
+            frame['close']=frame['close'].astype(float)
+            frame.loc[1,'close']=price
+            signal=detect_exit(frame)
+            self.assertTrue(signal['small_exposure'])
+            self.assertAlmostEqual(signal['exposure_pct_bandwidth'],.02/6*100)
+            text=message_for('TEST',signal,datetime(2026,10,12,14,0,tzinfo=timezone.utc))
+            self.assertIn('Exposición:',text)
+            self.assertIn('pequeña',text)
+
     def test_gap_opening_outside_bands_is_excluded_in_both_directions(self):
         for side, opening in (("SUPERIOR", 104), ("INFERIOR", 96)):
             frame = self.frame(side)

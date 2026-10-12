@@ -1,0 +1,118 @@
+# Revision de filtros: reentrada temprana y estabilidad
+
+Solo entrenamiento y validacion: >=100/40 casos, >=50% avisos, mejora >=3pp en continuidad15m y no empeorar retorno medio. Criterios de revision, no autorizacion de trading. Prueba reciente no selecciona ganador.
+Periodo reciente previamente explorado; no es prueba prospectiva independiente. Tasas descriptivas con fuentes correlacionadas e intervalos amplios. No ganancias de opciones ni certeza de ejecucion.
+
+| Filtro | Periodo | Casos | Positivo 5m % | Positivo 15m % | Reentrada dentro en 2m % | Retorno medio 15m % |
+|---|---|---:|---:|---:|---:|---:|
+| BASE | ENTRENAMIENTO | 1306 | 49.23 | 47.47 | 44.18 | -0.0094 |
+| BASE | VALIDACION | 322 | 50.31 | 51.86 | 42.24 | 0.0253 |
+| BASE | PRUEBA_RECIENTE | 293 | 49.83 | 49.15 | 38.91 | 0.0107 |
+| EXPOSICION_1 | ENTRENAMIENTO | 1135 | 49.25 | 48.11 | 38.24 | -0.0099 |
+| EXPOSICION_1 | VALIDACION | 288 | 53.12 | 55.21 | 37.85 | 0.0361 |
+| EXPOSICION_1 | PRUEBA_RECIENTE | 266 | 48.87 | 49.62 | 34.96 | 0.0155 |
+| EXPOSICION_3 | ENTRENAMIENTO | 898 | 48.55 | 46.21 | 30.29 | -0.0165 |
+| EXPOSICION_3 | VALIDACION | 241 | 55.19 | 57.68 | 33.61 | 0.0441 |
+| EXPOSICION_3 | PRUEBA_RECIENTE | 217 | 48.39 | 48.39 | 26.73 | 0.012 |
+| EXPOSICION_1_PERSISTENCIA | ENTRENAMIENTO | 783 | 49.04 | 47.64 | 26.44 | -0.0108 |
+| EXPOSICION_1_PERSISTENCIA | VALIDACION | 204 | 52.45 | 52.45 | 25.49 | 0.0434 |
+| EXPOSICION_1_PERSISTENCIA | PRUEBA_RECIENTE | 189 | 49.21 | 43.39 | 24.34 | -0.0189 |
+| EXPOSICION_1_ESPACIO_010 | ENTRENAMIENTO | 715 | 48.11 | 46.99 | 37.48 | -0.0231 |
+| EXPOSICION_1_ESPACIO_010 | VALIDACION | 278 | 51.08 | 55.76 | 37.77 | 0.0362 |
+| EXPOSICION_1_ESPACIO_010 | PRUEBA_RECIENTE | 235 | 49.36 | 48.51 | 34.04 | 0.0191 |
+| EXPOSICION_1_ESPACIO_020 | ENTRENAMIENTO | 685 | 48.47 | 47.59 | 36.35 | -0.0229 |
+| EXPOSICION_1_ESPACIO_020 | VALIDACION | 269 | 50.93 | 56.13 | 36.8 | 0.0359 |
+| EXPOSICION_1_ESPACIO_020 | PRUEBA_RECIENTE | 227 | 49.34 | 48.46 | 33.48 | 0.017 |
+| EXPOSICION_1_PAR_HORA | ENTRENAMIENTO | 420 | 50.24 | 47.62 | 35.95 | -0.0127 |
+| EXPOSICION_1_PAR_HORA | VALIDACION | 94 | 53.19 | 58.51 | 36.17 | 0.0297 |
+| EXPOSICION_1_PAR_HORA | PRUEBA_RECIENTE | 100 | 47.0 | 48.0 | 39.0 | -0.0093 |
+| EXPOSICION_1_PARES_HORA_DIARIO | ENTRENAMIENTO | 218 | 53.21 | 46.79 | 37.61 | -0.0048 |
+| EXPOSICION_1_PARES_HORA_DIARIO | VALIDACION | 30 | 56.67 | 73.33 | 33.33 | 0.1554 |
+| EXPOSICION_1_PARES_HORA_DIARIO | PRUEBA_RECIENTE | 55 | 49.09 | 45.45 | 43.64 | -0.0229 |
+| EXPOSICION_1_PAR_LARGO_HORA | ENTRENAMIENTO | 530 | 52.64 | 47.36 | 38.11 | -0.0277 |
+| EXPOSICION_1_PAR_LARGO_HORA | VALIDACION | 129 | 51.94 | 56.59 | 40.31 | 0.043 |
+| EXPOSICION_1_PAR_LARGO_HORA | PRUEBA_RECIENTE | 139 | 52.52 | 49.64 | 40.29 | -0.0033 |
+| EXPOSICION_1_CIERRE_HORA | ENTRENAMIENTO | 789 | 49.43 | 47.4 | 39.16 | -0.0111 |
+| EXPOSICION_1_CIERRE_HORA | VALIDACION | 186 | 54.3 | 53.23 | 35.48 | 0.0365 |
+| EXPOSICION_1_CIERRE_HORA | PRUEBA_RECIENTE | 178 | 51.69 | 50.56 | 33.15 | 0.0006 |
+| EXPOSICION_1_ESPACIO_010_PAR_HORA | ENTRENAMIENTO | 255 | 47.84 | 45.1 | 36.08 | -0.0318 |
+| EXPOSICION_1_ESPACIO_010_PAR_HORA | VALIDACION | 91 | 52.75 | 58.24 | 37.36 | 0.0264 |
+| EXPOSICION_1_ESPACIO_010_PAR_HORA | PRUEBA_RECIENTE | 90 | 45.56 | 46.67 | 36.67 | -0.0154 |
+
+## Candidatos que pasan la revision temporal
+Ninguno cumple todos los criterios. No justifica activar un filtro universal.
+
+## Desglose reciente por compania
+
+| Compania | Filtro | Casos | Positivo 15m % | Avisos retenidos |
+|---|---|---:|---:|---:|
+| AAPL | BASE | 29 | 41.38 | 35 |
+| AAPL | EXPOSICION_1 | 25 | 36.0 | 30 |
+| AAPL | EXPOSICION_1_PERSISTENCIA | 18 | 33.33 | 23 |
+| AAPL | EXPOSICION_1_ESPACIO_010 | 25 | 36.0 | 30 |
+| NVDA | BASE | 22 | 40.91 | 27 |
+| NVDA | EXPOSICION_1 | 18 | 44.44 | 23 |
+| NVDA | EXPOSICION_1_PERSISTENCIA | 15 | 40.0 | 18 |
+| NVDA | EXPOSICION_1_ESPACIO_010 | 15 | 40.0 | 20 |
+| TSLA | BASE | 28 | 46.43 | 36 |
+| TSLA | EXPOSICION_1 | 24 | 54.17 | 32 |
+| TSLA | EXPOSICION_1_PERSISTENCIA | 19 | 42.11 | 25 |
+| TSLA | EXPOSICION_1_ESPACIO_010 | 23 | 52.17 | 30 |
+| AMD | BASE | 14 | 42.86 | 21 |
+| AMD | EXPOSICION_1 | 12 | 50.0 | 19 |
+| AMD | EXPOSICION_1_PERSISTENCIA | 8 | 50.0 | 12 |
+| AMD | EXPOSICION_1_ESPACIO_010 | 9 | 66.67 | 14 |
+| META | BASE | 28 | 35.71 | 34 |
+| META | EXPOSICION_1 | 26 | 34.62 | 32 |
+| META | EXPOSICION_1_PERSISTENCIA | 19 | 36.84 | 23 |
+| META | EXPOSICION_1_ESPACIO_010 | 24 | 29.17 | 29 |
+| MSFT | BASE | 30 | 56.67 | 35 |
+| MSFT | EXPOSICION_1 | 25 | 56.0 | 28 |
+| MSFT | EXPOSICION_1_PERSISTENCIA | 15 | 53.33 | 18 |
+| MSFT | EXPOSICION_1_ESPACIO_010 | 23 | 56.52 | 26 |
+| BABA | BASE | 13 | 61.54 | 28 |
+| BABA | EXPOSICION_1 | 12 | 58.33 | 25 |
+| BABA | EXPOSICION_1_PERSISTENCIA | 11 | 27.27 | 23 |
+| BABA | EXPOSICION_1_ESPACIO_010 | 12 | 58.33 | 24 |
+| SPY | BASE | 15 | 53.33 | 19 |
+| SPY | EXPOSICION_1 | 15 | 46.67 | 18 |
+| SPY | EXPOSICION_1_PERSISTENCIA | 10 | 20.0 | 10 |
+| SPY | EXPOSICION_1_ESPACIO_010 | 13 | 46.15 | 15 |
+| QQQ | BASE | 18 | 66.67 | 24 |
+| QQQ | EXPOSICION_1 | 16 | 75.0 | 22 |
+| QQQ | EXPOSICION_1_PERSISTENCIA | 12 | 75.0 | 15 |
+| QQQ | EXPOSICION_1_ESPACIO_010 | 9 | 88.89 | 13 |
+| IWM | BASE | 18 | 61.11 | 23 |
+| IWM | EXPOSICION_1 | 17 | 58.82 | 21 |
+| IWM | EXPOSICION_1_PERSISTENCIA | 12 | 41.67 | 14 |
+| IWM | EXPOSICION_1_ESPACIO_010 | 14 | 57.14 | 18 |
+| DIA | BASE | 3 | 100.0 | 27 |
+| DIA | EXPOSICION_1 | 3 | 100.0 | 24 |
+| DIA | EXPOSICION_1_PERSISTENCIA | 1 | 100.0 | 11 |
+| DIA | EXPOSICION_1_ESPACIO_010 | 2 | 100.0 | 22 |
+| MU | BASE | 22 | 36.36 | 28 |
+| MU | EXPOSICION_1 | 21 | 38.1 | 27 |
+| MU | EXPOSICION_1_PERSISTENCIA | 16 | 43.75 | 19 |
+| MU | EXPOSICION_1_ESPACIO_010 | 19 | 36.84 | 24 |
+| NIO | BASE | 1 | 100.0 | 18 |
+| NIO | EXPOSICION_1 | 1 | 100.0 | 17 |
+| NIO | EXPOSICION_1_PERSISTENCIA | 1 | 100.0 | 8 |
+| NIO | EXPOSICION_1_ESPACIO_010 | 1 | 100.0 | 15 |
+| GLD | BASE | 4 | 100.0 | 29 |
+| GLD | EXPOSICION_1 | 4 | 75.0 | 23 |
+| GLD | EXPOSICION_1_PERSISTENCIA | 2 | 100.0 | 17 |
+| GLD | EXPOSICION_1_ESPACIO_010 | 3 | 66.67 | 15 |
+| AMZN | BASE | 24 | 45.83 | 33 |
+| AMZN | EXPOSICION_1 | 23 | 47.83 | 30 |
+| AMZN | EXPOSICION_1_PERSISTENCIA | 15 | 53.33 | 21 |
+| AMZN | EXPOSICION_1_ESPACIO_010 | 19 | 47.37 | 25 |
+| NFLX | BASE | 24 | 45.83 | 29 |
+| NFLX | EXPOSICION_1 | 24 | 45.83 | 29 |
+| NFLX | EXPOSICION_1_PERSISTENCIA | 15 | 33.33 | 17 |
+| NFLX | EXPOSICION_1_ESPACIO_010 | 24 | 45.83 | 28 |
+| AVGO | BASE | 0 | None | 0 |
+| AVGO | EXPOSICION_1 | 0 | None | 0 |
+| AVGO | EXPOSICION_1_PERSISTENCIA | 0 | None | 0 |
+| AVGO | EXPOSICION_1_ESPACIO_010 | 0 | None | 0 |
+
+No se activan supresiones. Antes de cambiar alertas: registrar prospectivamente en paralelo, comprobar costes de perder movimientos y ampliar muestras por compania/direccion.

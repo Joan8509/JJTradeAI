@@ -1034,6 +1034,48 @@ def _render_bollinger_study() -> None:
 @st.fragment(run_every="30s")
 def _render_strategy_research() -> None:
     _render_bollinger_study()
+    _render_filter_playback()
+
+
+def _render_filter_playback() -> None:
+    from bollinger_phone_worker import STRATEGY_VERSION
+    root=Path(__file__).resolve().parent/'exports'/'bollinger_playback'
+    paths=sorted(root.glob('filters_*/summary.json'))
+    if not paths:
+        return
+    try:
+        report=json.loads(paths[-1].read_text(encoding='utf-8'))
+    except (OSError,ValueError):
+        return
+    if report.get('version')!=STRATEGY_VERSION:
+        return
+    names={'BASE':'Aviso actual','EXPOSICION_1':'Esperar exposición de 1%',
+        'EXPOSICION_3':'Esperar exposición de 3%','EXPOSICION_1_PERSISTENCIA':'Exposición de 1% durante dos minutos',
+        'EXPOSICION_1_ESPACIO_010':'Exposición + espacio de 0,10%','EXPOSICION_1_ESPACIO_020':'Exposición + espacio de 0,20%',
+        'EXPOSICION_1_PAR_HORA':'Exposición + tendencia 20/40 de Hora',
+        'EXPOSICION_1_PARES_HORA_DIARIO':'Exposición + tendencia 20/40 de Hora y Diario',
+        'EXPOSICION_1_PAR_LARGO_HORA':'Exposición + tendencia 100/200 de Hora',
+        'EXPOSICION_1_CIERRE_HORA':'Exposición + última Hora a favor',
+        'EXPOSICION_1_ESPACIO_010_PAR_HORA':'Exposición + espacio + tendencia de Hora'}
+    with st.expander('Playback con medias y niveles: comparación de filtros'):
+        st.caption('Playback fijo de 180 días, corte: '+_market_event_local_time(report.get('as_of')))
+        st.write('Se comparan avisos más selectivos. Exposición significa porcentaje del ancho de Bollinger; espacio significa porcentaje del precio. Estos filtros siguen en investigación y no suprimen Telegram.')
+        period_label=st.selectbox('Periodo para comparar',['Estudio inicial','Contraste posterior','Últimos 30 días'],index=2,key='filter_playback_period')
+        period={'Estudio inicial':'ENTRENAMIENTO','Contraste posterior':'VALIDACION','Últimos 30 días':'PRUEBA_RECIENTE'}[period_label]
+        rows=[row for row in report.get('summary',[]) if row['period']==period]
+        st.dataframe(pd.DataFrame([{'Filtro':names.get(row['candidate'],row['candidate']),
+            'Avisos':row['retained'],'Casos sin solapar':row['sample'],'A favor a 5m %':row.get('positive_5_pct'),
+            'A favor a 15m %':row['positive_pct'],'Regresó dentro en 2m %':row.get('reentry_2m_pct'),
+            'Demora media (min)':row['mean_delay_minutes'],'Positivos originales descartados':row['suppressed_original_positive']}
+            for row in rows]),hide_index=True,width='stretch')
+        symbols=sorted({row['symbol'] for row in report.get('by_symbol',[])})
+        if symbols:
+            symbol=st.selectbox('Ver compañía en los últimos 30 días',symbols,key='filter_playback_symbol')
+            individual=[row for row in report['by_symbol'] if row['symbol']==symbol]
+            st.dataframe(pd.DataFrame([{'Filtro':names.get(row['candidate'],row['candidate']),
+                'Avisos':row['retained'],'Casos':row['sample'],'A favor a 15m %':row['positive_pct'],
+                'Muestra': 'Pocos casos' if row['sample']<20 else 'Descriptiva'} for row in individual]),hide_index=True,width='stretch')
+        st.caption('El resultado se mide desde el precio del nuevo aviso. Tasas históricas sin costos de opciones; los periodos recientes ya fueron explorados y necesitan contraste en sesiones nuevas.')
 
 
 def _render_all_strategy_research() -> None:
@@ -1381,6 +1423,8 @@ def render_bollinger_dashboard() -> None:
         with st.container(border=True):
             st.markdown(f"**{item['symbol']} · {direction} · Salida en formación**")
             st.write(f"Disipador {signal['side'].lower()} · Precio observado: {signal['price']:.2f}")
+            if signal.get('exposure_pct_bandwidth') is not None:
+                st.caption(f"Exposición: {signal['exposure_pct_bandwidth']:.2f}% del ancho de Bollinger"+(' · salida pequeña, revisar continuidad.' if signal.get('small_exposure') else '. Este porcentaje no es una probabilidad de acierto.'))
             if signal.get('ma_context'):
                 from bollinger_ma_context import context_text
                 st.caption(context_text(signal['ma_context']))

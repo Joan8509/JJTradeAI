@@ -86,3 +86,7 @@ Se implementaron cruces observados y dos transiciones de sesiones para validar t
 ## Referencias de precio incorporadas
 Cierre de sesion anterior por calendario y comprobacion de ultimo minuto IEX; maximo del historial anterior disponible, nunca presentado como ATH real confirmado. Distancias y barrera candidata combinadas con SMA, Telegram y dashboard. Sin bloquear entradas. ATH real pendiente de cobertura completa. Pasaron 104 pruebas. Ver docs/BOLLINGER_PRICE_LEVELS.md.
 
+
+## Playback completo de filtros
+2721 eventos en 180 dias, 16 simbolos, 11 variantes, 120/30/30 dias. Ninguna variante mejoro de forma consistente segun los criterios de revision; no se activo supresion universal. Radar y Telegram muestran exposicion y salida pequena (<1% del ancho), sin cambiar detector v3. Dashboard Seguimiento de resultados incluye comparacion por periodo/compania. 114 pruebas pasaron y vista de filtros probada sin excepciones. Ver docs/BOLLINGER_FILTER_PLAYBACK.md y exports/bollinger_playback/filters_20261012_233955/. Comparaciones completas comprimidas y verificadas; JSON bruto local excluido de Git.
+
