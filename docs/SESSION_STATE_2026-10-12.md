@@ -82,3 +82,7 @@ Confirmacion de Joan: las medias de TC2000 son SMA. Se mantienen calculadas desd
 ## Reglas de medias implementadas posteriormente
 Se implementaron cruces observados y dos transiciones de sesiones para validar tendencia; fases, separacion y conteo de cruces; posibles pisos/techos/continuidad segun direccion; contacto y cierre direccional de ultima Hora con media conocida antes de abrir; episodios de contacto horario. Dashboard incluye detalle y Vercel preparado muestra medias. Tolerancias, lateralidad, debilitamiento y espacio minimo quedan pendientes de validacion, no se inventaron filtros. Pasaron 100 pruebas. Ver docs/BOLLINGER_MA_CONTEXT.md.
 
+
+## Referencias de precio incorporadas
+Cierre de sesion anterior por calendario y comprobacion de ultimo minuto IEX; maximo del historial anterior disponible, nunca presentado como ATH real confirmado. Distancias y barrera candidata combinadas con SMA, Telegram y dashboard. Sin bloquear entradas. ATH real pendiente de cobertura completa. Pasaron 104 pruebas. Ver docs/BOLLINGER_PRICE_LEVELS.md.
+

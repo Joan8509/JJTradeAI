@@ -1,11 +1,13 @@
 """Descriptive closed-bar MA context, never an entry or notification gate."""
 from functools import lru_cache
 import math
+import sqlite3
 
 import pandas as pd
 from live_market import aggregate_minute_bars
 from market_store import MarketBarStore
 from moving_average_rules import pair_history, level_role, hour_confirmation, touch_episodes
+from bollinger_price_levels import price_levels, price_levels_text
 
 PERIODS=(20,40,100,200)
 
@@ -85,8 +87,13 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
     ahead=[l for l in levels if l['ahead']]
     potential_limits=[l for l in ahead if l['role'] in ('POSIBLE_PISO','POSIBLE_TECHO')]
     unknown=[l for l in ahead if l['role']=='TENDENCIA_NO_VALIDADA']
-    return {'state':'DESCRIPTIVO' if levels else 'SIN_DATOS','ma_type':ma_type,'provisional':False,
+    references=price_levels(datasets['1D'],price=price,side=side,available_at=available)
+    barriers=[{'label':f"SMA{level['period']} {level['timeframe']}",**level} for level in potential_limits]
+    barriers.extend(level for level in references['levels'] if level['ahead'])
+    return {'state':'DESCRIPTIVO' if levels or references['levels'] else 'SIN_DATOS','ma_type':ma_type,'provisional':False,
             'available_at':available.isoformat(),'price':price,'frames':frames,'levels':levels,
+            'price_levels':references,
+            'nearest_barrier':min(barriers,key=lambda level:level['distance_pct']) if barriers else None,
             'nearest_ahead':min(ahead,key=lambda l:l['distance_pct']) if ahead else None,
             'nearest_possible_limit':min(potential_limits,key=lambda l:l['distance_pct']) if potential_limits else None,
             'assessment':'POSIBLE_LIMITE_POR_DELANTE' if potential_limits else 'TENDENCIA_PENDIENTE' if unknown else 'SIN_LIMITE_IDENTIFICADO',
@@ -103,7 +110,18 @@ def _history(database,symbol,provider,feed,hour_key):
         start=(available-pd.Timedelta(days=480)).to_pydatetime(),end=available.to_pydatetime())
     if bars.empty:
         return None
-    return {tf:aggregate_minute_bars(bars,tf) for tf in ('1H','1D')}
+    data={tf:aggregate_minute_bars(bars,tf) for tf in ('1H','1D')}
+    local=pd.to_datetime(bars.date,utc=True).dt.tz_convert('America/New_York')
+    minute_of_day=local.dt.hour*60+local.dt.minute
+    regular=bars[(minute_of_day>=570) & (minute_of_day<960)].copy()
+    regular['session_date']=pd.to_datetime(regular.date,utc=True).dt.tz_convert('America/New_York').dt.date.astype(str)
+    data['1D'].attrs['last_minute_by_session']={key:pd.Timestamp(value).isoformat() for key,value in regular.groupby('session_date').date.max().items()}
+    with sqlite3.connect(database) as db:
+        sessions=db.execute('SELECT session_date,closes_at FROM market_sessions').fetchall()
+    data['1D'].attrs['session_closes']=dict(sessions)
+    previous=[date for date,_ in sessions if date<available.tz_convert('America/New_York').date().isoformat()]
+    data['1D'].attrs['expected_previous_session']=max(previous) if previous else None
+    return data
 
 
 def live_context(database, symbol, provider, feed, source_time, signal):
@@ -144,5 +162,10 @@ def context_text(context):
         lines.append(f"Última vela de Hora cerrada ({stamp:%m/%d %H:%M} ET): {nearest['hour_confirmation'].lower().replace('_',' ')}.")
     if not context.get('complete'):
         lines.append('Historial insuficiente para algunas medias, incluida la diaria de 200.')
+    if context.get('price_levels'):
+        lines.append(price_levels_text(context['price_levels']))
+    barrier=context.get('nearest_barrier')
+    if barrier:
+        lines.append(f"Próxima barrera candidata: {barrier['label']} a {barrier['distance_pct']:.3f}%. No garantiza rechazo.")
     lines.append('Contexto descriptivo con barras recibidas; no confirma rebote ni ruptura.')
     return '\n'.join(lines)

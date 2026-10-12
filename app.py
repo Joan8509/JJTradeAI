@@ -1384,6 +1384,14 @@ def render_bollinger_dashboard() -> None:
             if signal.get('ma_context'):
                 from bollinger_ma_context import context_text
                 st.caption(context_text(signal['ma_context']))
+                reference_levels=signal['ma_context'].get('price_levels',{}).get('levels',[])
+                if reference_levels:
+                    with st.expander('Cierre anterior y máximo del historial'):
+                        st.dataframe(pd.DataFrame([{'Nivel':level['label'],'Precio':level['value'],
+                            'Distancia %':level['distance_pct'],'Delante del movimiento':level['ahead'],
+                            'Papel posible':level['role'],'Sesión de referencia':level['source_date'],
+                            'Cobertura':level['quality']} for level in reference_levels]),hide_index=True,width='stretch')
+                        st.caption('El máximo disponible no confirma el all-time high real. Los niveles son referencias posibles, no garantizan un freno al precio.')
                 with st.expander('Ver medias, cruces y cierres de Hora'):
                     context = signal['ma_context']
                     pairs = []

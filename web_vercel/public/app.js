@@ -10,6 +10,7 @@ function renderMedias(card,context){
   details.append(textNode('p',`${frame.timeframe} ${pair.periods.join('/')} · ${pair.direction} · ${state}`));
  }}
  for(const level of context.levels||[])details.append(textNode('p',`${level.timeframe} SMA${level.period}: ${level.value.toFixed(2)} · distancia ${level.distance_pct.toFixed(3)}% · ${(level.role||'Contexto pendiente').replaceAll('_',' ').toLowerCase()}`));
+ for(const level of context.price_levels?.levels||[])details.append(textNode('p',`${level.label}: ${level.value.toFixed(2)} · ${level.distance_pct.toFixed(3)}% ${level.ahead?'por delante':'por detrás'}`));
  details.append(textNode('p','Posibles pisos, techos y continuidad; no garantizan recorrido ni aprueban una entrada.'));
  card.append(details);
 }
