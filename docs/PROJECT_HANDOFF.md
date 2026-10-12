@@ -3,6 +3,44 @@
 Fecha de recuperacion: 2026-07-08.
 Actualizado: 2026-07-14.
 
+## Recuperacion tras reinicio
+
+Estado verificado el 2026-09-13:
+
+- Streamlit se inicia automaticamente al iniciar sesion en Windows mediante
+  `scripts/start_jjtrade_app.ps1`.
+- La interfaz queda disponible en `http://localhost:8501`.
+- El lanzador no crea una segunda instancia si el puerto 8501 ya esta ocupado.
+- Los datos persistidos permanecen en `exports/jjtrade_journal.db` y
+  `exports/market_data.db`; los backups verificables estan en
+  `exports/backups/`.
+- El historial de esta conversacion pertenece a VS Code/Copilot y no forma
+  parte del repositorio. Para recuperar el trabajo aunque el chat no se abra,
+  usar este documento como contexto inicial.
+
+Cambios de codigo que estaban guardados en disco pero pendientes de commit al
+cerrar la sesion:
+
+```text
+app.py
+learning_engine.py
+live_strategy_service.py
+paper_signal_evaluator.py
+tests/test_learning_engine.py
+tests/test_live_strategy_service.py
+tests/test_paper_signal_evaluator.py
+```
+
+Antes de continuar una nueva sesion, ejecutar:
+
+```powershell
+Set-Location C:\JJTradeAI
+git status --short
+.\venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+No se deben guardar credenciales en este documento ni en el repositorio.
+
 ## Estado recuperado
 
 El proyecto esta en `0.2.1-beta` con metodologia `investep-draft-0.1`.
@@ -261,3 +299,7 @@ El repositorio Git fue reinicializado en `C:\JJTradeAI` despues de encontrar una
 carpeta `.git` invalida. No se hizo commit inicial. Como el historial se perdio,
 `git status --short` muestra la base como archivos sin trackear hasta que Joan
 decida crear el primer commit.
+
+## Actualizacion 2026-10-12
+El estado actual de Bollinger, Telegram, playback TSLA y pendientes esta en docs/SESSION_STATE_2026-10-12.md. Los respaldos locales verificados se generan con scripts/backup_progress.py en backups/. No equivalen a alojamiento web ni garantizan reinicio automatico.
+

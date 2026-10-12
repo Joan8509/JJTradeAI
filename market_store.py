@@ -86,6 +86,7 @@ class MarketBarStore:
         symbol: str,
         provider: str,
         feed: str,
+        only_missing: bool = False,
     ) -> int:
         bars = normalize_minute_bars(frame)
         identity = _normalize_identity(symbol, provider, feed)
@@ -95,20 +96,21 @@ class MarketBarStore:
             for row in bars.itertuples(index=False)
         ]
         with self._connect() as connection:
-            connection.executemany(
-                """
+            query = """
                 INSERT INTO minute_bars (
                     symbol, provider, feed, timestamp, open, high, low, close,
                     volume, received_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+            query += "ON CONFLICT(provider, feed, symbol, timestamp) DO NOTHING" if only_missing else """
                 ON CONFLICT(provider, feed, symbol, timestamp) DO UPDATE SET
                     open=excluded.open, high=excluded.high, low=excluded.low,
                     close=excluded.close, volume=excluded.volume,
                     received_at=excluded.received_at
-                """,
-                rows,
-            )
-        return len(rows)
+                """
+            connection.executemany(query, rows)
+            changed = connection.total_changes
+        return changed if only_missing else len(rows)
 
     def upsert_bar(self, bar: MarketBar, *, provider: str, feed: str) -> int:
         frame = pd.DataFrame(

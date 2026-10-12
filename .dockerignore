@@ -1,0 +1,14 @@
+.git
+.codex
+.agents
+.aws
+venv
+.venv
+__pycache__
+**/__pycache__
+**/*.pyc
+exports
+.env
+**/.env
+**/.env.*
+**/.vercel

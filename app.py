@@ -1,12 +1,14 @@
 """Interfaz local de decisión asistida para JJTrade AI."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import base64
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import html
 import json
 import os
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,6 +59,10 @@ from journal import JournalRepository
 from live_strategy_service import AlertRepository
 from live_service_runtime import ServiceHealthRepository
 from visual_evidence import VisualEvidenceRepository
+from worden_review import WordenReviewRepository
+from minute_gap_audit import recover_session_gaps
+from safe_diagnostics import sanitize_diagnostic_detail
+from paper_entry_validation import entry_evidence, validate_paper_entry
 from alert_reevaluation import reevaluate_alert
 from learning_engine import audit_learning_advisory, evaluate_temporal_stability, summarize_alert_feedback, summarize_context_performance, summarize_strategy_performance
 from risk_engine import OptionQuote, RiskLimits, evaluate_option_risk
@@ -74,7 +80,7 @@ from strategies.retorno_bollinger_lateral import evaluate_retorno_bollinger_late
 from strategies.salto_lateralidad_hora import evaluate_salto_lateralidad_hora
 from validation_batch import INTAKE_TEMPLATE_FIELDS, OPERATOR_BOARD_FIELDS
 from version import APP_VERSION, METHODOLOGY_VERSION
-from watchlist_config import DEFAULT_SYMBOLS_TEXT
+from watchlist_config import DEFAULT_SYMBOLS_TEXT, load_watchlist
 from setup_timing import evaluate_setup_timing
 from alert_event import setup_signature
 
@@ -414,6 +420,279 @@ def _simple_alert_summary(alert: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _current_strategy_certainty(report: Mapping[str, object]) -> dict[str, object]:
+    """Resume la estrategia dominante y su certidumbre histórica para la alerta seleccionada."""
+    if not isinstance(report, Mapping):
+        return {"strategy": "SIN_ESTRATEGIA", "confidence": 0.0, "priority": "MINIMA", "direction": "SIN_SESGO", "status": "MUESTRA_INSUFICIENTE"}
+
+    combined_sources = []
+    for key in ("automatic_learning_signal", "directional_learning_signal"):
+        signal = report.get(key, {})
+        if not isinstance(signal, Mapping):
+            continue
+        rows = signal.get("rows", []) if isinstance(signal, Mapping) else []
+        if not rows:
+            continue
+        source_priority = 1 if key == "automatic_learning_signal" else 0
+        best = max(rows, key=lambda row: float(row.get("confidence_score") or 0.0))
+        combined_sources.append({
+            "source_priority": source_priority,
+            "strategy": str(best.get("strategy_id") or "SIN_ESTRATEGIA"),
+            "confidence": float(best.get("confidence_score") or 0.0),
+            "priority": str(best.get("priority") or "MINIMA"),
+            "direction": str(best.get("historical_direction") or "NO_CALIBRADA"),
+            "status": str(signal.get("status") or "MUESTRA_INSUFICIENTE"),
+            "summary_score": float(signal.get("summary_score") or 0.0),
+        })
+
+    if not combined_sources:
+        return {"strategy": "SIN_ESTRATEGIA", "confidence": 0.0, "priority": "MINIMA", "direction": "SIN_SESGO", "status": "MUESTRA_INSUFICIENTE"}
+
+    preferred = max(
+        combined_sources,
+        key=lambda item: (
+            item["confidence"],
+            1 if item["priority"].upper() == "ALTA" else 0 if item["priority"].upper() == "MEDIA" else -1 if item["priority"].upper() == "BAJA" else -2,
+            item["source_priority"],
+        ),
+    )
+    return {
+        "strategy": preferred["strategy"],
+        "confidence": preferred["confidence"],
+        "priority": preferred["priority"],
+        "direction": preferred["direction"],
+        "status": preferred["status"],
+    }
+
+
+def _preview_confidence_badge(report: Mapping[str, object] | None, *, direction_status: str | None = None) -> dict[str, object]:
+    """Devuelve la cara visible de la certeza histórica para un resumen live."""
+    if not isinstance(report, Mapping):
+        report = {}
+    combined_sources = []
+    for key in ("automatic_learning_signal", "directional_learning_signal"):
+        signal = report.get(key, {})
+        if not isinstance(signal, Mapping):
+            continue
+        rows = signal.get("rows", []) if isinstance(signal, Mapping) else []
+        if not rows:
+            continue
+        best = max(rows, key=lambda row: float(row.get("confidence_score") or 0.0))
+        confidence = float(best.get("confidence_score") or 0.0)
+        priority = str(best.get("priority") or "MINIMA").upper()
+        combined_sources.append((confidence, priority))
+    if combined_sources:
+        confidence, priority = max(
+            combined_sources,
+            key=lambda item: (
+                item[0],
+                1 if item[1] == "ALTA" else 0 if item[1] == "MEDIA" else -1 if item[1] == "BAJA" else -2,
+            ),
+        )
+        if confidence >= 80 or priority == "ALTA":
+            label, tone = "ALTA", "high"
+        elif confidence >= 60 or priority == "MEDIA":
+            label, tone = "MEDIA", "medium"
+        elif confidence > 0 or priority == "BAJA":
+            label, tone = "BAJA", "low"
+        else:
+            label, tone = "SIN_CERTIDUMBRE", "none"
+        return {
+            "label": label,
+            "priority": priority,
+            "confidence_pct": int(round(confidence)),
+            "tone": tone,
+        }
+    status_text = str(direction_status or "").upper()
+    if "DIRECCIONES EN CONFLICTO" in status_text or "SIN DIRECCIÓN CONFIRMADA" in status_text:
+        return {"label": "BAJA", "priority": "BAJA", "confidence_pct": 25, "tone": "low"}
+    if "EN FORMACION" in status_text or "REQUIERE CONFIRMACION" in status_text or "PRELIMINAR" in status_text:
+        return {"label": "MEDIA", "priority": "MEDIA", "confidence_pct": 55, "tone": "medium"}
+    return {"label": "SIN_CERTIDUMBRE", "priority": "MINIMA", "confidence_pct": 0, "tone": "none"}
+
+
+def _live_direction_guidance(report: Mapping[str, object]) -> dict[str, object]:
+    """Devuelve la orientación de dirección probable para una alerta en vivo."""
+    if not isinstance(report, Mapping):
+        return {"direction": "SIN_SESGO", "status": "SIN_EVIDENCIA", "confidence_pct": 0, "priority": "MINIMA"}
+
+    automatic = report.get("automatic_learning_signal", {})
+    if isinstance(automatic, Mapping):
+        status = str(automatic.get("status", "MUESTRA_INSUFICIENTE"))
+        direction = str(automatic.get("recommended_direction") or "").upper()
+        confidence = float(automatic.get("summary_score") or 0.0)
+        if direction in {"CALL", "PUT"}:
+            if status == "APRENDIZAJE_ALINEADO":
+                if confidence >= 80:
+                    return {"direction": direction, "status": "CONFIRMADA", "confidence_pct": int(round(confidence)), "priority": "ALTA"}
+                if confidence >= 60:
+                    return {"direction": direction, "status": "PROBABLE", "confidence_pct": int(round(confidence)), "priority": "MEDIA"}
+            if status == "APRENDIZAJE_CONTRARIO":
+                return {"direction": direction, "status": "CONTRARIA", "confidence_pct": int(round(confidence)), "priority": "MINIMA"}
+
+    signal = report.get("directional_learning_signal", {})
+    if isinstance(signal, Mapping):
+        rows = signal.get("rows", []) if isinstance(signal, Mapping) else []
+        if rows:
+            best = max(rows, key=lambda row: float(row.get("confidence_score") or 0.0))
+            direction = str(best.get("historical_direction") or "").upper()
+            confidence = float(best.get("confidence_score") or 0.0)
+            priority = str(best.get("priority") or "MINIMA").upper()
+            if direction in {"CALL", "PUT"}:
+                if confidence >= 80 or priority == "ALTA":
+                    return {"direction": direction, "status": "CONFIRMADA", "confidence_pct": int(round(confidence)), "priority": priority}
+                if confidence >= 60 or priority == "MEDIA":
+                    return {"direction": direction, "status": "PROBABLE", "confidence_pct": int(round(confidence)), "priority": priority}
+                return {"direction": direction, "status": "PENDIENTE", "confidence_pct": int(round(confidence)), "priority": priority}
+
+    decision = report.get("decision", {})
+    if isinstance(decision, Mapping):
+        direction = str(decision.get("decision") or "").upper()
+        if direction in {"CALL", "PUT"}:
+            return {"direction": direction, "status": "PENDIENTE", "confidence_pct": 0, "priority": "MINIMA"}
+
+    return {"direction": "SIN_SESGO", "status": "SIN_EVIDENCIA", "confidence_pct": 0, "priority": "MINIMA"}
+
+
+def _lead_live_signal(alerts: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Devuelve la señal principal más fuerte para destacar en la UI."""
+    if not alerts:
+        return {"direction": "SIN_SESGO", "status": "SIN_EVIDENCIA", "confidence_pct": 0, "priority": "MINIMA", "strategy": "SIN_ESTRATEGIA"}
+
+    status_rank = {"CONFIRMADA": 5, "PROBABLE": 4, "PENDIENTE": 3, "CONTRARIA": -5, "SIN_EVIDENCIA": -10}
+    priority_rank = {"ALTA": 3, "MEDIA": 2, "BAJA": 1, "MINIMA": 0}
+
+    def ranking_key(item: Mapping[str, object]) -> tuple[int, int, int]:
+        status = str(item.get("status", "SIN_EVIDENCIA")).upper()
+        priority = str(item.get("priority", "MINIMA")).upper()
+        confidence = int(item.get("confidence_pct", 0))
+        return (
+            status_rank.get(status, -99),
+            priority_rank.get(priority, -1),
+            confidence,
+        )
+
+    best = max(
+        (
+            {
+                **_live_direction_guidance(item.get("report", {})),
+                "strategy": str(_current_strategy_certainty(item.get("report", {})).get("strategy", "SIN_ESTRATEGIA")),
+            }
+            for item in alerts
+            if isinstance(item, Mapping)
+        ),
+        key=ranking_key,
+        default={"direction": "SIN_SESGO", "status": "SIN_EVIDENCIA", "confidence_pct": 0, "priority": "MINIMA", "strategy": "SIN_ESTRATEGIA"},
+    )
+    return best
+
+
+def _alert_live_certainty_rank(item: Mapping[str, object]) -> tuple[float, int, int]:
+    """Ordena alertas por certidumbre real del movimiento aprendido y la fuerza histórica."""
+    report = item.get("report", {}) if isinstance(item, Mapping) else {}
+    if not isinstance(report, Mapping):
+        return (0.0, 0, int(item.get("id", 0)))
+
+    priority_rank = {"ALTA": 3, "MEDIA": 2, "BAJA": 1, "MINIMA": 0}
+    status_rank = {"CONFIRMADA": 3, "PROBABLE": 2, "PENDIENTE": 1, "CONTRARIA": -1, "SIN_EVIDENCIA": 0}
+
+    automatic = report.get("automatic_learning_signal", {})
+    auto_score = 0.0
+    auto_priority = "MINIMA"
+    auto_status = "SIN_EVIDENCIA"
+    if isinstance(automatic, Mapping):
+        auto_status = str(automatic.get("status", "SIN_EVIDENCIA")).upper()
+        auto_score = float(automatic.get("summary_score") or 0.0)
+        rows = automatic.get("rows", []) if isinstance(automatic, Mapping) else []
+        if rows:
+            best_auto_row = max(rows, key=lambda row: float(row.get("confidence_score") or 0.0))
+            auto_score = max(auto_score, float(best_auto_row.get("confidence_score") or 0.0))
+            auto_priority = str(best_auto_row.get("priority") or automatic.get("priority") or "MINIMA").upper()
+
+    directional = report.get("directional_learning_signal", {})
+    best_score = 0.0
+    best_priority = "MINIMA"
+    best_status = "SIN_EVIDENCIA"
+    if isinstance(directional, Mapping):
+        rows = directional.get("rows", []) if isinstance(directional, Mapping) else []
+        if rows:
+            best_row = max(rows, key=lambda row: float(row.get("confidence_score") or 0.0))
+            best_score = float(best_row.get("confidence_score") or 0.0)
+            best_priority = str(best_row.get("priority") or "MINIMA").upper()
+            best_status = str(directional.get("status", "SIN_EVIDENCIA")).upper()
+
+    confidence_score = max(best_score, auto_score)
+    confidence_priority = max(
+        (best_priority, auto_priority),
+        key=lambda name: priority_rank.get(name.upper(), 0),
+        default="MINIMA",
+    )
+    confidence_status = max(
+        (best_status, auto_status),
+        key=lambda name: status_rank.get(name.upper(), -99),
+        default="SIN_EVIDENCIA",
+    )
+    if confidence_status == "CONTRARIA":
+        confidence_score *= 0.4
+    return (
+        confidence_score,
+        priority_rank.get(confidence_priority.upper(), 0) + status_rank.get(confidence_status.upper(), 0),
+        int(item.get("id", 0)),
+    )
+
+
+def _operating_signal_status(report: Mapping[str, object]) -> dict[str, object]:
+    """Clasifica una alerta para PAPER sin autorizar ejecucion real."""
+    if not isinstance(report, Mapping):
+        return {"status": "BLOQUEADA", "label": "BLOQUEADA", "reasons": ["Reporte no disponible."]}
+
+    reasons: list[str] = []
+    decision_payload = report.get("decision", {})
+    decision = str(decision_payload.get("decision", "NO_OPERAR")) if isinstance(decision_payload, Mapping) else "NO_OPERAR"
+    if decision not in {"CALL", "PUT"}:
+        reasons.append("La decision final no es operable.")
+
+    freshness = report.get("live_data_freshness", {})
+    if isinstance(freshness, Mapping) and freshness.get("status") not in {None, "APROBADO"}:
+        reasons.append("La frescura de datos no esta aprobada.")
+    reconciliation = report.get("market_data_reconciliation", {})
+    if isinstance(reconciliation, Mapping) and reconciliation.get("status") not in {None, "APROBADO", "OMITIDO"}:
+        reasons.append("La reconciliacion de mercado no esta aprobada.")
+
+    timing = report.get("setup_timing", {})
+    if isinstance(timing, Mapping) and str(timing.get("status", "")).upper() in {"VENCIDA", "BLOQUEADA"}:
+        reasons.append("La vigencia del setup esta vencida o bloqueada.")
+
+    automatic = report.get("automatic_learning_signal", {})
+    automatic_status = str(automatic.get("status", "MUESTRA_INSUFICIENTE")) if isinstance(automatic, Mapping) else "MUESTRA_INSUFICIENTE"
+    automatic_direction = str(automatic.get("recommended_direction") or "") if isinstance(automatic, Mapping) else ""
+    automatic_score = float(automatic.get("summary_score") or 0.0) if isinstance(automatic, Mapping) else 0.0
+    automatic_contradiction = automatic_status == "APRENDIZAJE_CONTRARIO" or (
+        automatic_direction in {"CALL", "PUT"} and automatic_direction != decision
+    )
+    if automatic_status != "APRENDIZAJE_ALINEADO" or automatic_direction != decision or automatic_score < 80.0:
+        reasons.append("La validacion automatica aun no confirma la direccion con umbral >= 80%.")
+
+    if reasons:
+        if automatic_contradiction:
+            reasons[-1] = "La validacion automatica contradice la direccion actual."
+        waiting_only = reasons == ["La validacion automatica aun no confirma la direccion con umbral >= 80%."]
+        return {
+            "status": "ESPERAR_VALIDACION" if waiting_only else "BLOQUEADA",
+            "label": "ESPERAR VALIDACION" if waiting_only else "BLOQUEADA",
+            "reasons": reasons,
+            "paper_only": True,
+            "real_trading_authorized": False,
+        }
+    return {
+        "status": "PAPER_APTA_REVISION",
+        "label": "PAPER APTA PARA REVISION",
+        "reasons": ["Compuertas de senal y validacion automatica superadas; requiere revision antes de cualquier accion."],
+        "paper_only": True,
+        "real_trading_authorized": False,
+    }
+
+
 def _parse_alert_time(value: object) -> datetime | None:
     """Interpreta timestamps ISO de alertas y exige una zona horaria real."""
     try:
@@ -438,7 +717,7 @@ def _market_event_local_time(value: object) -> str:
 
 def _simple_moment_status(
     summary: Mapping[str, object], *, scanner_active: bool,
-    now: datetime | None = None,
+    now: datetime | None = None, market_open: bool = True,
 ) -> dict[str, object]:
     """Determina si una alerta se revisa ahora o es solo historica."""
     current = now or datetime.now(timezone.utc)
@@ -463,7 +742,7 @@ def _simple_moment_status(
         # siguiente cierre, no solo durante el segundo en que se persiste.
         if trigger_utc.minute % 15 == 14:
             valid_until += timedelta(minutes=15)
-    if not scanner_active:
+    if not market_open or not scanner_active:
         status, label = "HISTORICA", "SESION FINALIZADA"
     elif valid_until is None or current.astimezone(timezone.utc) >= valid_until:
         status, label = "VENCIDA", "SENAL VENCIDA"
@@ -700,6 +979,201 @@ def _load_feed_comparison(path: str | Path = "exports/feed_comparison.json") -> 
     return _feed_comparison_summary(payload)
 
 
+def _render_bollinger_study() -> None:
+    from bollinger_phone_worker import STRATEGY_VERSION
+    st.subheader("Bollinger con volatilidad · ¿Continúa en la dirección de salida?")
+    st.caption("Estudio exclusivo de 15 minutos. Superior: continuación al alza; inferior: continuación a la baja. No envía órdenes.")
+    path = Path(__file__).resolve().parent / "exports" / "bollinger_study" / "latest.json"
+    try:
+        study = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st.info("Se está preparando el primer estudio de esta estrategia.")
+        return
+    if study.get("version") != STRATEGY_VERSION:
+        st.info("Recalculando el estudio para excluir aperturas que saltan fuera de Bollinger. Los resultados anteriores no se mezclan con esta regla.")
+        return
+    st.caption("Actualizado: " + _market_event_local_time(study.get("generated_at")) + " · últimos 30 días de datos locales.")
+    if datetime.now(timezone.utc) - datetime.fromisoformat(study["generated_at"]) > timedelta(minutes=10):
+        st.warning("El estudio lleva más de diez minutos sin actualizarse.")
+    origin_label = st.radio("Qué resultados quieres revisar", ["Detecciones en vivo", "Reconstrucción histórica"], horizontal=True, key="bollinger_study_origin")
+    origin = "RECONSTRUIDA" if origin_label == "Reconstrucción histórica" else "EN_VIVO"
+    st.caption("La reconstrucción reproduce cada minuto con barras guardadas. No demuestra que esos avisos se hayan enviado ni reproduce demoras o revisiones del proveedor." if origin == "RECONSTRUIDA" else "Solo detecciones guardadas por el radar desde que se habilitó este registro, con su hora real de observación.")
+    horizon = st.selectbox("¿Cuántos minutos después de la detección?", [5, 15, 30, 60], index=1, key="bollinger_study_horizon")
+    rows = [r for r in study["summary"] if r["origin"] == origin and r["horizon"] == horizon]
+    if rows:
+        st.dataframe(pd.DataFrame([
+            {"Compañía": r["symbol"], "Fuente": f"{r['provider']} / {r['feed']}",
+             "Salida": "Superior · alza" if r["side"] == "SUPERIOR" else "Inferior · baja",
+             "Detecciones": r["detected"], "Casos sin solapamiento": r["sample"], "Sesiones": r["sessions"],
+             "Continuó a favor": r["positive"], "Terminó en contra": r["negative"], "Sin cambio": r["unchanged"],
+             "% a favor": r["positive_pct"], "Movimiento medio a favor %": r["average_return_pct"],
+             "Evidencia": "Faltan casos o sesiones" if r["status"] == "MUESTRA_INSUFICIENTE" else "Historial descriptivo · sin certeza calibrada"}
+            for r in rows]), width="stretch", hide_index=True)
+    else:
+        st.info("Todavía no hay detecciones registradas para este grupo.")
+    st.caption("Positivo significa que el precio terminó a favor respecto al precio observado, aunque el avance sea pequeño. No significa que un CALL o PUT ganara dinero ni que alcanzara el 20%.")
+    observations = [r for r in study["observations"] if r["origin"] == origin and r["horizon"] == horizon]
+    totals = st.columns(4)
+    totals[0].metric("Salidas registradas", len(observations))
+    totals[1].metric("Recorridos evaluados", sum(r["status"] == "EVALUADA" for r in observations))
+    totals[2].metric("Esperando recorrido", sum(r["status"] == "PENDIENTE" for r in observations))
+    totals[3].metric("Sin datos o sin tiempo antes del cierre", sum(r["status"] not in {"EVALUADA", "PENDIENTE"} for r in observations))
+    st.caption("Estos totales cuentan detecciones individuales. La tabla de porcentajes excluye ventanas solapadas; sus cantidades pueden ser menores.")
+    with st.expander("Ver movimientos individuales y casos pendientes"):
+        if observations:
+            st.dataframe(pd.DataFrame([
+                {"Compañía": r["symbol"], "Salida": r["side"], "Observada": _market_event_local_time(r["detected_at"]),
+                 "Precio observado": r["price"], "Estado": r["status"], "Resultado": r.get("result", "Pendiente / no evaluable"),
+                 "Movimiento a favor %": r.get("directional_return_pct"), "Máximo avance a favor %": r.get("favorable_excursion_pct"),
+                 "Máximo recorrido en contra %": r.get("adverse_excursion_pct")}
+                for r in sorted(observations, key=lambda r:r["detected_at"], reverse=True)[:100]]), width="stretch", hide_index=True)
+        st.caption("Minutos faltantes, recorridos pendientes y ventanas que exceden el cierre se separan de positivos y negativos. No se rellenan datos ausentes.")
+    st.info("Las reglas permanecen fijas mientras reunimos evidencia. Una tasa histórica alta no garantiza el siguiente movimiento; este estudio no habilita compras automáticas.")
+
+
+@st.fragment(run_every="30s")
+def _render_strategy_research() -> None:
+    _render_bollinger_study()
+
+
+def _render_all_strategy_research() -> None:
+    report_path = Path(__file__).resolve().parent / "exports" / "strategy_research" / "latest.json"
+    st.subheader("Seguimiento de resultados de estrategias")
+    with st.container():
+        if not report_path.is_file():
+            st.info("El seguimiento todavía no ha generado su primer informe.")
+            return
+        try:
+            research = json.loads(report_path.read_text(encoding="utf-8"))
+            generated_at = datetime.fromisoformat(research["generated_at"])
+        except (OSError, ValueError, KeyError):
+            st.info("El informe de seguimiento todavía no está disponible.")
+            return
+        st.caption(
+            "Actualizado: " + generated_at.astimezone(ZoneInfo("America/New_York")).strftime("%d/%m/%Y %I:%M %p ET")
+            + ". Resultados del subyacente sin costos; las tasas históricas no son probabilidades de la próxima señal."
+        )
+        if datetime.now(timezone.utc) - generated_at > timedelta(minutes=10):
+            st.warning("El informe lleva más de 10 minutos sin actualizarse.")
+        coverage = research.get("detector_coverage", [])
+        gap_audit = research.get("minute_gap_audit", {})
+        if gap_audit:
+            st.markdown("**Cobertura de minutos por sesión**")
+            st.caption("Compara minutos cerrados con el calendario guardado, incluidos cierres anticipados. Un minuto sin barra no demuestra pérdida de datos ni ausencia de operaciones.")
+            gaps = gap_audit.get("rows", [])
+            st.dataframe(pd.DataFrame([
+                {"Símbolo": item["symbol"], "Feed": item["feed"], "Sesión": item["session_date"],
+                 "Minutos revisados": item["expected_minutes"], "Barras locales": item["observed_minutes"],
+                 "Minutos sin barra": item["missing_minutes"], "Cobertura %": item["coverage_pct"], "Estado": item["status"]}
+                for item in gaps
+            ]), width="stretch", hide_index=True)
+            recoverable = {f"{item['symbol']} · {item['session_date']} · {item['feed']} · {item['missing_minutes']} minutos sin barra": item
+                           for item in gaps if item["missing_minutes"] > 0 and item["provider"] == "ALPACA"}
+            if recoverable:
+                with st.form("recover_minute_gaps"):
+                    selected_gap = st.selectbox("Sesión a consultar en Alpaca", list(recoverable))
+                    recovery_key = st.text_input("Alpaca API key para recuperación", type="password")
+                    recovery_secret = st.text_input("Alpaca API secret para recuperación", type="password")
+                    st.caption("Consulta una sesión con el mismo feed e inserta únicamente barras faltantes. Las credenciales no se guardan en archivos.")
+                    recover_requested = st.form_submit_button("Consultar y recuperar barras disponibles")
+                if recover_requested:
+                    if not recovery_key.strip() or not recovery_secret.strip():
+                        st.info("Introduce las credenciales en estos campos para consultar el proveedor.")
+                    else:
+                        try:
+                            audit = recoverable[selected_gap]
+                            provider = AlpacaMarketDataProvider(AlpacaMarketConfig(recovery_key.strip(), recovery_secret.strip(), feed=audit["feed"]))
+                            recovered = recover_session_gaps(MarketBarStore(), provider, audit=audit, provider_name="ALPACA", feed=audit["feed"])
+                        except Exception as error:
+                            st.error("No se completó la recuperación: " + sanitize_diagnostic_detail(str(error)))
+                        else:
+                            st.success(f"Se insertaron {recovered['inserted']} barras. Quedan {recovered['remaining']} minutos sin barra en ese período.")
+                            st.caption("El informe reflejará la nueva cobertura en su próxima actualización. Si quedan minutos ausentes, la causa continúa sin determinar.")
+        if coverage:
+            st.markdown("**Cobertura de las ocho estrategias y Expuesto Bollinger**")
+            st.dataframe(pd.DataFrame([
+                {
+                    "Estrategia": item["name"], "Escaneos evaluados": item["evaluated_scans"],
+                    "Detectados": item["detected_scans"], "Confirmados": item["confirmed_scans"],
+                    "Omitidos": item["skipped_scans"], "Errores": item["error_scans"],
+                    "Último escaneo por símbolo": ", ".join(f"{status}: {count}" for status, count in item["latest_status_counts"].items()),
+                    "Pendientes frecuentes en detecciones": "; ".join(f"{blocker['criterion']} ({blocker['status']})" for blocker in item["blockers"][:2]),
+                    "Datos o revisiones faltantes": "; ".join(f"{requirement['name']} ({requirement['status']})" for requirement in item.get("unavailable_requirements", [])[:2]),
+                }
+                for item in coverage
+            ]), width="stretch", hide_index=True)
+            st.caption("Los escaneos incluyen todos los registros históricos. Sin detección significa que el detector corrió y no encontró su configuración; una omisión o un error se muestran por separado.")
+        cohort = st.radio("Resultados posteriores", ["Estrategias confirmadas", "Candidatas pendientes"],
+                          horizontal=True, key="research_cohort")
+        candidate_mode = cohort == "Candidatas pendientes"
+        entry_mode = st.radio("Precio de referencia", ["Posterior a la emisión", "Cierre de la vela de señal"],
+                              horizontal=True, key="research_entry_basis") == "Posterior a la emisión"
+        if entry_mode:
+            st.caption("Estudio del subyacente: apertura del minuto posterior a la disponibilidad de la señal y cierre tras el horizonte elegido. Exige todas las barras del recorrido; no representa una ejecución real ni incluye costos.")
+        if candidate_mode:
+            st.info("Observaciones de configuraciones detectadas sin todos sus requisitos. Sirven para investigar; conservan su estado pendiente y no alteran las señales.")
+        horizon = st.selectbox("Movimiento posterior (minutos)", [15, 30, 60], index=2, key="research_horizon")
+        table = []
+        research_key = ("entry_candidate_strategies" if candidate_mode else "entry_strategies") if entry_mode else ("candidate_strategies" if candidate_mode else "strategies")
+        for row in research.get(research_key, []):
+            if row["horizon_minutes"] != horizon:
+                continue
+            stats = row["non_overlapping"]
+            table.append({
+                "Estrategia": row["strategy_id"], "Dirección": row["bias"],
+                "Versión": row["methodology_version"], "Muestra sin solapamiento": stats["sample_size"],
+                "Sesiones": stats["session_count"], "Positivos %": stats["positive_rate_pct"],
+                "Retorno medio %": stats["average_directional_return_pct"],
+                "Período anterior positivos %": row["prior_period"]["positive_rate_pct"],
+                "Período reciente positivos %": row["recent_period"]["positive_rate_pct"],
+                "Sesiones recientes": row["recent_period"]["session_count"],
+            })
+        if table:
+            st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
+        else:
+            st.info("Todavía no hay resultados para este horizonte.")
+        st.caption("Positivo: movimiento a favor mayor que cero. Las ventanas superpuestas del mismo símbolo se excluyen; distintos símbolos todavía pueden estar correlacionados.")
+        if entry_mode:
+            cohort_key = "CANDIDATAS" if candidate_mode else "CONFIRMADAS"
+            entry_states = [item for item in research.get("entry_status_counts", []) if item["cohort"] == cohort_key]
+            st.caption("Estado de las observaciones, sumando 15, 30 y 60 minutos: " + "; ".join(f"{item['status']}: {item['count']}" for item in entry_states))
+            observations = [item for item in research.get("entry_observations", {}).get(cohort_key, []) if item["horizon_minutes"] == horizon]
+            if observations:
+                st.markdown("**Entradas y salidas estudiadas más recientes**")
+                st.dataframe(pd.DataFrame([
+                    {"Alerta": item["alert_id"], "Símbolo": item["symbol"], "Estrategia": item["strategy_id"],
+                     "Señal disponible ET": datetime.fromisoformat(item["signal_available_at"]).astimezone(ZoneInfo("America/New_York")).strftime("%d/%m %H:%M:%S"),
+                     "Entrada ET": datetime.fromisoformat(item["entry_timestamp"]).astimezone(ZoneInfo("America/New_York")).strftime("%d/%m %H:%M"),
+                     "Precio entrada": item["entry_price"],
+                     "Salida ET": datetime.fromisoformat(item["exit_timestamp"]).astimezone(ZoneInfo("America/New_York")).strftime("%d/%m %H:%M"),
+                     "Precio salida": item["exit_price"], "Movimiento a favor %": item["directional_return_pct"]}
+                    for item in sorted(observations, key=lambda item: item["entry_timestamp"], reverse=True)[:20]
+                ]), width="stretch", hide_index=True)
+        experiments = [item for item in research.get("filter_experiments", [])
+                       if not entry_mode and item["horizon_minutes"] == horizon
+                       and item["cohort"] == ("CANDIDATAS" if candidate_mode else "CONFIRMADAS")]
+        if experiments:
+            st.markdown("**Pruebas de posibles mejoras**")
+            st.caption("Las hipótesis y su evaluación inicial quedan fijadas. La prueba futura usa sesiones posteriores al registro; mejora descriptiva no significa precisión demostrada.")
+            st.dataframe(pd.DataFrame([
+                {
+                    "Estrategia": item["strategy_id"], "Filtro en prueba": item["name"],
+                    "Versión": item["methodology_version"],
+                    "Muestra histórica filtrada": item["historical_test"]["filtered"]["sample_size"],
+                    "Sesiones históricas filtradas": item["historical_test"]["filtered"]["session_count"],
+                    "Prueba histórica": item["historical_test"]["status"],
+                    "Cambio positivos (puntos)": item["historical_test"]["positive_rate_delta_points"],
+                    "Cambio retorno medio %": item["historical_test"]["average_return_delta_pct"],
+                    "Oportunidades retenidas %": item["historical_test"]["retained_pct"],
+                    "Muestra futura filtrada": item["forward_test"]["filtered"]["sample_size"],
+                    "Prueba futura": item["forward_test"]["status"],
+                }
+                for item in experiments
+            ]), width="stretch", hide_index=True)
+        st.download_button("Descargar investigación JSON", data=json.dumps(research, ensure_ascii=False, indent=2),
+                           file_name="investigacion_estrategias.json", mime="application/json", key="download_strategy_research")
+
+
 def _render_scanner_controls(process_status: Mapping[str, object]) -> None:
     """Controla el buscador desde la pantalla principal."""
     with st.expander(
@@ -707,8 +1181,19 @@ def _render_scanner_controls(process_status: Mapping[str, object]) -> None:
         expanded=not bool(process_status.get("active")),
     ):
         scanner_active = bool(process_status.get("active"))
+        configured_symbols = load_watchlist()["symbols"]
+        configured_text = ",".join(configured_symbols)
+        running_health = ServiceHealthRepository().get("live_strategy_scanner") if scanner_active else {}
+        running_symbols = set((running_health or {}).get("symbols", []))
+        pending_symbols = sorted(set(configured_symbols) - running_symbols) if scanner_active else []
+        if pending_symbols:
+            st.warning("Agregados a la lista, pendientes de reiniciar el buscador: " + ", ".join(pending_symbols))
+            st.caption("Todavía no reciben datos ni avisos. Para aplicarlos, detén el buscador y vuelve a iniciarlo con la lista guardada y tus credenciales de Alpaca.")
+        existing_text = st.session_state.get("control_scanner_symbols")
+        if not scanner_active and existing_text and set(existing_text.split(",")).issubset(set(configured_symbols)):
+            st.session_state["control_scanner_symbols"] = configured_text
         scanner_symbols = st.text_input(
-            "Compañías a vigilar", value=DEFAULT_SYMBOLS_TEXT,
+            "Compañías a vigilar", value=configured_text,
             key="control_scanner_symbols", disabled=scanner_active,
         )
         scanner_days = st.number_input(
@@ -848,6 +1333,75 @@ def _dashboard_background_data_uri() -> str:
     return f"data:image/png;base64,{encoded}"
 
 
+def _bollinger_state_is_current(item, *, now, market_open):
+    stamp = _parse_alert_time(item.get("source_timestamp"))
+    return bool(market_open and stamp is not None and timedelta(minutes=1) <= now-stamp <= timedelta(minutes=3))
+
+
+@st.fragment(run_every="15s")
+def render_bollinger_dashboard() -> None:
+    from bollinger_phone_worker import STRATEGY_VERSION
+    st.subheader("Salida de Bollinger con volatilidad · 15 minutos")
+    st.caption("Un solo enfoque: detectar el comienzo de una salida y medir si el precio continúa en esa dirección. Avisos tempranos, sin órdenes automáticas.")
+    now = datetime.now(timezone.utc)
+    database = AlertRepository().database_path
+    session = MarketSessionRepository(database).session(now.astimezone(ZoneInfo("America/New_York")).date())
+    market_open = session is not None and session.opens_at <= now < session.closes_at
+    process_status = read_instance_status("exports/live_scanner.lock")
+    configured = load_watchlist()["symbols"]
+    columns = st.columns(3)
+    columns[0].metric("Estrategia", "Bollinger 15m")
+    columns[1].metric("Símbolos configurados", len(configured))
+    columns[2].metric("Sesión regular", "Abierta" if market_open else "Cerrada / sin calendario")
+    _render_scanner_controls(process_status)
+    st.caption("Salida superior → movimiento alcista / CALL. Salida inferior → movimiento bajista / PUT. La vela debe abrir dentro de las bandas anteriores y después salir con volatilidad. Una apertura ya expuesta queda excluida.")
+    states, events = [], []
+    try:
+        with closing(sqlite3.connect(f"file:{Path(database).resolve().as_posix()}?mode=ro", uri=True)) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "bollinger_radar_state" in tables:
+                states = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM bollinger_radar_state")]
+            if "bollinger_live_events" in tables:
+                events = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM bollinger_live_events ORDER BY detected_at DESC LIMIT 50")]
+    except (sqlite3.Error, OSError, ValueError):
+        st.warning("No se pudieron consultar los estados del radar. Revisa el buscador.")
+    current = [item for item in states if item.get("version") == STRATEGY_VERSION and _bollinger_state_is_current(item, now=now, market_open=market_open)]
+    events = [event for event in events if event.get("version") == STRATEGY_VERSION]
+    detected = [item for item in current if item.get("signal")]
+    st.markdown("### Qué está ocurriendo ahora")
+    if not market_open:
+        st.info("El radar espera la sesión regular. Las detecciones anteriores son historial y no entradas vigentes.")
+    elif not current:
+        st.warning("Esperando datos recientes del radar de Bollinger. Comprueba que el buscador y el servicio de avisos estén activos.")
+    elif not detected:
+        st.info(f"Se están revisando {len(current)} símbolos con datos recientes. Todavía no hay una salida nueva que cumpla la regla.")
+    for item in detected:
+        signal = item["signal"]
+        direction = "ALCISTA · CALL" if signal["side"] == "SUPERIOR" else "BAJISTA · PUT"
+        with st.container(border=True):
+            st.markdown(f"**{item['symbol']} · {direction} · Salida en formación**")
+            st.write(f"Disipador {signal['side'].lower()} · Precio observado: {signal['price']:.2f}")
+            st.caption("Barra: " + _market_event_local_time(item["source_timestamp"]) + ". Revisa el gráfico: esta salida puede revertirse.")
+    with st.expander("Compañías y estado del radar"):
+        latest = {item["symbol"]: item for item in states}
+        fresh = {item["symbol"] for item in current}
+        st.dataframe(pd.DataFrame([
+            {"Símbolo": symbol, "Estado": "Salida detectada" if symbol in fresh and latest[symbol].get("signal") else "Vigilando · sin salida nueva" if symbol in fresh else "Esperando sesión" if not market_open else "Sin datos recientes / pendiente de activar",
+             "Última barra": _market_event_local_time(latest[symbol]["source_timestamp"]) if symbol in latest else "Sin registro"}
+            for symbol in configured]), width="stretch", hide_index=True)
+    with st.expander("Últimas detecciones guardadas · historial"):
+        if events:
+            st.dataframe(pd.DataFrame([
+                {"Compañía": e["symbol"], "Salida": e["side"], "Detectada": _market_event_local_time(e["detected_at"]),
+                 "Precio observado": e["price"], "Estado": "Observación guardada · consultar resultado"}
+                for e in events]), width="stretch", hide_index=True)
+        else:
+            st.caption("Todavía no hay detecciones en vivo guardadas. La reconstrucción histórica está en Seguimiento de resultados.")
+    st.markdown("### Cómo comprobamos su efectividad")
+    st.write("En Seguimiento de resultados verás si cada salida continuó a favor o terminó en contra a 5, 15, 30 y 60 minutos. Los casos pendientes y los datos incompletos se muestran separados.")
+    st.caption("La observación continúa aunque pauses Telegram. El PC, el buscador y el radar deben permanecer encendidos.")
+
+
 @st.fragment(run_every="15s")
 def render_operational_dashboard() -> None:
     """Vista principal: estado de la app y oportunidades que requieren accion."""
@@ -917,14 +1471,32 @@ def render_operational_dashboard() -> None:
         .jj-card:hover {transform:translateY(-1px);border-color:#42618b}
         .jj-card.call {border-left-color:#34d399;background:#112a2b}
         .jj-card.put {border-left-color:#fb7185;background:#2b1c2a}
+        .jj-card.high {border-left-color:#34d399;background:linear-gradient(135deg,#112a2b,#10302c)}
+        .jj-card.medium {border-left-color:#fbbf24;background:linear-gradient(135deg,#2b2517,#1a2837)}
+        .jj-card.low {border-left-color:#fb7185;background:linear-gradient(135deg,#2b1c2a,#1b2441)}
+        .jj-card.featured {box-shadow:0 0 0 1px rgba(96,165,250,.45),0 12px 24px rgba(96,165,250,.12);border-color:#5bb7ff}
         .jj-card-title {font-size:1.03rem;font-weight:680;color:#edf3fb}
         .jj-badge {display:inline-block;padding:.22rem .55rem;border-radius:999px;background:#20314a;
           font-size:.7rem;font-weight:750;margin-left:.35rem;color:#b5c2d3;letter-spacing:.02em}
         .jj-badge.call {background:#123b35;color:#6ee7b7}.jj-badge.put {background:#442230;color:#fda4af}
+        .jj-badge.high {background:#123b35;color:#6ee7b7}.jj-badge.medium {background:#3d3316;color:#f8d977}
+        .jj-badge.low {background:#45212b;color:#fda4af}.jj-badge.none {background:#20314a;color:#dfeaf8}
+        .jj-top-signal {display:inline-block;padding:.18rem .52rem;border-radius:999px;background:#0f4a7a;color:#dbeafe;
+          font-size:.64rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;margin-left:.35rem;border:1px solid rgba(147,197,253,.5)}
         .jj-meta {font-size:.79rem;color:#8999af;margin-top:.5rem}
         .jj-pending {font-size:.88rem;color:#c2cede;margin-top:.55rem}
         .jj-step {display:inline-block;font-size:.69rem;font-weight:750;letter-spacing:.12em;color:#91b5ff;
           background:#142a4c;border:1px solid #294e85;border-radius:7px;padding:.3rem .65rem;margin-top:1.5rem;margin-bottom:.25rem}
+        .jj-top-banner {background:linear-gradient(135deg,#11253d 0%,#162f4f 100%);border:1px solid #31588b;border-radius:14px;
+          padding:1rem 1.1rem;margin:1rem 0 1.2rem;box-shadow:0 12px 24px rgba(37,99,235,.06)}
+        .jj-top-banner .title {font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:#7cc0ff;font-weight:800}
+        .jj-top-banner .value {font-size:1.45rem;font-weight:800;color:#f8fbff;letter-spacing:-.02em;margin-top:.25rem}
+        .jj-top-banner .meta {display:flex;flex-wrap:wrap;gap:.55rem;margin-top:.55rem}
+        .jj-top-banner .chip {display:inline-block;padding:.35rem .6rem;border-radius:999px;background:#20314a;color:#d7e7ff;
+          font-size:.72rem;font-weight:700;border:1px solid rgba(148,163,184,.3)}
+        .jj-top-banner .chip.high {background:#123b35;color:#6ee7b7;border-color:rgba(52,211,153,.45)}
+        .jj-top-banner .chip.medium {background:#3d3316;color:#f8d977;border-color:rgba(251,191,36,.5)}
+        .jj-top-banner .chip.low {background:#45212b;color:#fda4af;border-color:rgba(251,113,133,.45)}
         @media (max-width: 640px) {
           .block-container {padding-left:1rem!important;padding-right:1rem!important;padding-top:1.15rem!important}
           div[data-testid="stTabs"] {overflow-x:auto}
@@ -963,7 +1535,12 @@ def render_operational_dashboard() -> None:
     )
     process_status = read_instance_status("exports/live_scanner.lock")
     scanner_active = bool(process_status.get("active"))
-    next_evaluation = _next_quarter_hour().strftime("%I:%M %p ET") if scanner_active else "N/D"
+    dashboard_now = datetime.now(timezone.utc)
+    dashboard_session = MarketSessionRepository(AlertRepository().database_path).session(
+        dashboard_now.astimezone(ZoneInfo("America/New_York")).date()
+    )
+    session_open = dashboard_session is not None and dashboard_session.opens_at <= dashboard_now < dashboard_session.closes_at
+    next_evaluation = _next_quarter_hour().strftime("%I:%M %p ET") if scanner_active and session_open else "Esperando apertura" if scanner_active else "N/D"
     status_tone = "active" if scanner_active else "stopped"
     st.markdown(
         f"""<div class="jj-status-grid">
@@ -979,34 +1556,94 @@ def render_operational_dashboard() -> None:
         st.error("Inicia el scanner con el control que aparece debajo.")
     _render_scanner_controls(process_status)
     _render_price_ranges()
-    previews = _current_live_previews(LiveBollingerPreviewRepository(
+    stored_previews = LiveBollingerPreviewRepository(
         AlertRepository().database_path
-    ).current())
+    ).current()
+    previews = _current_live_previews(stored_previews, now=dashboard_now) if session_open else []
     active_previews = [item for item in previews if item.get("strategies")]
     st.markdown('<div class="jj-step">1 · QUÉ SE ESTÁ FORMANDO</div>', unsafe_allow_html=True)
     st.markdown("### Estrategias en vivo")
-    if scanner_active and not active_previews:
-        st.info("Sin estrategias intravela detectadas en este momento.")
+    preview_cards: list[tuple[dict[str, object], str]] = []
     for item in active_previews:
+        base_report = item.get("report", {}) if isinstance(item, Mapping) else {}
         for strategy in item.get("strategies", []):
             bias = str(strategy.get("bias", "SIN_SESGO"))
+            probable_bias = str(strategy.get("potential_bias") or bias)
+            display_bias = probable_bias if probable_bias in {"CALL", "PUT"} else bias
             tone = bias.lower() if bias in {"CALL", "PUT"} else ""
+            tone = display_bias.lower() if display_bias in {"CALL", "PUT"} else tone
             symbol = html.escape(str(item.get("symbol", "N/D")))
             name = html.escape(str(strategy.get("name", strategy.get("strategy_id", "Estrategia"))))
             timeframe = html.escape(str(strategy.get("timeframe", "N/D")))
-            direction_status = html.escape(str(
-                strategy.get("direction_status", "DIRECCIÓN PRELIMINAR")
-            ))
+            direction_status = str(strategy.get("direction_status", "DIRECCIÓN PRELIMINAR"))
+            signal_badge = _preview_confidence_badge(base_report, direction_status=direction_status)
             pending = html.escape(str(strategy.get("next_requirement", "Confirmar al cierre")))
             event_time = html.escape(_market_event_local_time(item.get("as_of")))
-            st.markdown(
-                f"""<div class="jj-card {tone}"><div class="jj-card-title">{symbol} · {name}
-                <span class="jj-badge {tone}">{html.escape(bias)}</span>
-                <span class="jj-badge">{timeframe}</span><span class="jj-badge">{direction_status}</span></div>
-                <div class="jj-meta">Actualizada {event_time}</div>
-                <div class="jj-pending"><b>Pendiente:</b> {pending}</div></div>""",
-                unsafe_allow_html=True,
-            )
+            preview_cards.append((
+                {
+                    "symbol": symbol,
+                    "name": name,
+                    "bias": display_bias,
+                    "signal_kind": "PROBABLE" if probable_bias != bias and display_bias in {"CALL", "PUT"} else "DIRECCIÓN",
+                    "timeframe": timeframe,
+                    "direction_status": html.escape(direction_status),
+                    "pending": pending,
+                    "event_time": event_time,
+                    "tone": tone,
+                    "badge": signal_badge,
+                },
+                signal_badge["confidence_pct"],
+            ))
+    ranked_preview_cards = sorted(preview_cards, key=lambda entry: entry[1], reverse=True)
+    if ranked_preview_cards:
+        top_payload = ranked_preview_cards[0][0]
+        top_badge = top_payload["badge"]
+        st.markdown(
+            f"""<div class="jj-top-banner">
+            <div class="title">Top signal actual</div>
+            <div class="value">{top_payload['symbol']} · {top_payload['name']}</div>
+            <div class="meta">
+                <span class="chip {top_badge['tone']}">Certeza: {top_badge['label']} · {top_badge['confidence_pct']}%</span>
+                <span class="chip">Dirección: {top_payload['direction_status']}</span>
+                <span class="chip">Tiempo: {top_payload['timeframe']}</span>
+            </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+    if not session_open:
+        st.info("La sesión regular está cerrada o su calendario no está disponible. Las últimas detecciones se conservan abajo como historial; no son señales activas para entrar.")
+    elif scanner_active and not previews:
+        st.warning("El buscador figura encendido, pero el dashboard no tiene datos de los últimos tres minutos. Revisa la conexión del buscador.")
+    elif scanner_active and not active_previews:
+        st.info(f"Radar actualizado: {len(previews)} compañías con datos recientes. En este momento ninguna cumple las condiciones para mostrar una estrategia en formación.")
+    with st.expander("Últimas estrategias observadas · historial"):
+        history_rows = [
+            {"Compañía": item.get("symbol"), "Estrategia": strategy.get("name", strategy.get("strategy_id")),
+             "Temporalidad": strategy.get("timeframe"), "Última observación": _market_event_local_time(item.get("as_of")),
+             "Estado": "Registro anterior · revisar vigencia"}
+            for item in stored_previews for strategy in item.get("strategies", [])
+        ]
+        if history_rows:
+            st.dataframe(pd.DataFrame(history_rows), width="stretch", hide_index=True)
+        else:
+            st.caption("Los últimos estados del radar no contienen estrategias detectadas. Las señales anteriores permanecen en el historial de alertas del dashboard.")
+        st.caption("Esta lista muestra el último estado guardado por compañía, no todas las detecciones del día. Los avisos de Telegram funcionan en un servicio separado.")
+    ranked_preview_cards = sorted(preview_cards, key=lambda entry: entry[1], reverse=True)
+    for index, (payload, _) in enumerate(ranked_preview_cards):
+        featured = " featured" if index == 0 else ""
+        certainty_class = payload["badge"]["tone"] if payload["badge"]["tone"] in {"high", "medium", "low"} else "none"
+        top_label = '<span class="jj-top-signal">TOP SIGNAL</span>' if index == 0 else ""
+        st.markdown(
+            f"""<div class="jj-card {payload['tone']} {certainty_class}{featured}"><div class="jj-card-title">{payload['symbol']} · {payload['name']}
+            <span class="jj-badge {payload['tone']}">{html.escape(payload['bias'])}</span>
+            <span class="jj-badge">{html.escape(payload['signal_kind'])}</span>
+            <span class="jj-badge">{payload['timeframe']}</span>
+            <span class="jj-badge {payload['badge']['tone']}">{payload['badge']['label']} · {payload['badge']['confidence_pct']}%</span>
+            <span class="jj-badge">{payload['direction_status']}</span>{top_label}</div>
+            <div class="jj-meta">Actualizada {payload['event_time']}</div>
+            <div class="jj-pending"><b>Pendiente:</b> {payload['pending']}</div></div>""",
+            unsafe_allow_html=True,
+        )
     alerts = [
         item for item in AlertRepository().recent(limit=100)
         if item.get("event_type") != "SIN_SETUP"
@@ -1029,7 +1666,7 @@ def render_operational_dashboard() -> None:
                     break
                 episode_start = previous
         summary["first_detected_timestamp"] = episode_start.get("trigger_timestamp")
-        moment = _simple_moment_status(summary, scanner_active=scanner_active)
+        moment = _simple_moment_status(summary, scanner_active=scanner_active, market_open=session_open, now=dashboard_now)
         cards.append((summary, moment))
     priority = {
         "SIMULAR": 0, "REVISAR": 1, "ESPERAR": 2,
@@ -1050,7 +1687,9 @@ def render_operational_dashboard() -> None:
     observation_cards = [item for item in current_cards if item not in actionable_cards]
     st.markdown('<div class="jj-step">2 · QUÉ HACER AHORA</div>', unsafe_allow_html=True)
     st.markdown("### Señal para operar")
-    if not scanner_active:
+    if not session_open:
+        st.info("NO OPERAR · Sesión regular cerrada o calendario no disponible. El buscador puede seguir conectado, pero no hay señales activas ni aprobaciones vigentes para entrar.")
+    elif not scanner_active:
         st.warning("NO OPERAR · La app no esta recibiendo mercado en vivo.")
     elif not actionable_cards:
         st.info(
@@ -1318,6 +1957,59 @@ def render_live_alerts() -> None:
     pending_alerts = AlertRepository().recent_unacknowledged(limit=100)
     new_alert_count = AlertRepository().unacknowledged_count()
     st.metric("Alertas nuevas sin acuse", new_alert_count)
+    if alerts:
+        latest_report = alerts[0].get("report", {}) if isinstance(alerts[0], Mapping) else {}
+        latest_signal = _current_strategy_certainty(latest_report)
+        latest_guidance = _live_direction_guidance(latest_report)
+        lead_signal = _lead_live_signal(alerts)
+        confidence_pct = float(latest_signal["confidence"])
+        priority = str(latest_signal["priority"])
+        if confidence_pct >= 80:
+            status_color = "success"
+            status_label = "ALTA"
+        elif confidence_pct >= 60:
+            status_color = "warning"
+            status_label = "MEDIA"
+        elif confidence_pct > 0:
+            status_color = "info"
+            status_label = "BAJA"
+        else:
+            status_color = "secondary"
+            status_label = "SIN_CERTIDUMBRE"
+        if lead_signal["direction"] in {"CALL", "PUT"}:
+            if lead_signal["status"] == "CONFIRMADA":
+                tone = "#103d34" if lead_signal["direction"] == "CALL" else "#3f1d2b"
+                accent = "#34d399" if lead_signal["direction"] == "CALL" else "#fb7185"
+                label = "ALTA CERTEZA"
+            elif lead_signal["status"] == "PROBABLE":
+                tone = "#2d2f43" if lead_signal["direction"] == "CALL" else "#38293a"
+                accent = "#fbbf24" if lead_signal["direction"] == "CALL" else "#fda4af"
+                label = "PROBABLE"
+            else:
+                tone = "#2b2b36"
+                accent = "#a78bfa"
+                label = "SEGUIMIENTO"
+            st.markdown(
+                f"<div style='padding:14px 18px;border-radius:12px;background:{tone};border-left:8px solid {accent};color:#f8fafc;font-weight:800;font-size:1.05rem;line-height:1.4;'>"
+                f"{lead_signal['direction']} · {label} · {lead_signal['confidence_pct']}% · {lead_signal['strategy']}</div>",
+                unsafe_allow_html=True,
+            )
+        if latest_signal["status"] == "APRENDIZAJE_ALINEADO":
+            st.success(f"Estrategia en vivo: {latest_signal['strategy']} · certeza histórica {confidence_pct:.1f}% · prioridad {priority} · estado {status_label}")
+        elif latest_signal["status"] == "APRENDIZAJE_CONTRARIO":
+            st.warning(f"Estrategia en vivo: {latest_signal['strategy']} · evidencia contraria · certeza {confidence_pct:.1f}% · prioridad {priority}")
+        elif latest_signal["strategy"] != "SIN_ESTRATEGIA":
+            st.info(f"Estrategia en vivo: {latest_signal['strategy']} · certeza histórica {confidence_pct:.1f}% · prioridad {priority} · requiere revisión")
+        else:
+            st.info("Estrategia en vivo: SIN_ESTRATEGIA · aún no hay evidencia histórica suficiente para certificar la operación.")
+        st.caption(
+            f"Dirección probable: {latest_guidance['direction']} · estado {latest_guidance['status']} · certeza {latest_guidance['confidence_pct']}% · prioridad {latest_guidance['priority']}"
+        )
+        live_summary_cols = st.columns(4)
+        live_summary_cols[0].metric("Estrategia en vivo", latest_signal["strategy"])
+        live_summary_cols[1].metric("Certeza histórica", f"{latest_signal['confidence']:.1f}%")
+        live_summary_cols[2].metric("Prioridad", latest_signal["priority"])
+        live_summary_cols[3].metric("Dirección probable", latest_guidance["direction"])
     paper_readiness = evaluate_paper_readiness(
         preflight=latest_preflight, process=process_status,
         operational=operational, pending_alert_count=new_alert_count,
@@ -1426,6 +2118,11 @@ def render_live_alerts() -> None:
     visible_alerts = alerts if show_no_setup else [
         item for item in alerts if item.get("event_type") not in informational_events
     ]
+    visible_alerts = sorted(
+        visible_alerts,
+        key=_alert_live_certainty_rank,
+        reverse=True,
+    )
     if not visible_alerts:
         st.info("Existen escaneos guardados, pero ninguno requiere atención.")
         return
@@ -1442,6 +2139,36 @@ def render_live_alerts() -> None:
     }
     selected = st.selectbox("Detalle de alerta", list(labels))
     report = labels[selected]["report"]
+    current_signal = _current_strategy_certainty(report)
+    operating_signal = _operating_signal_status(report)
+    live_guidance = _live_direction_guidance(report)
+    strategy_cols = st.columns(4)
+    strategy_cols[0].metric("Estrategia actual", current_signal["strategy"])
+    strategy_cols[1].metric("Certeza histórica", f"{current_signal['confidence']:.1f}%")
+    strategy_cols[2].metric("Prioridad", current_signal["priority"])
+    strategy_cols[3].metric("Dirección probable", live_guidance["direction"])
+    if live_guidance["status"] == "CONFIRMADA":
+        st.success(f"Dirección probable confirmada: {live_guidance['direction']} · certeza {live_guidance['confidence_pct']}% · prioridad {live_guidance['priority']}")
+    elif live_guidance["status"] == "PROBABLE":
+        st.info(f"Dirección probable: {live_guidance['direction']} · certeza {live_guidance['confidence_pct']}% · prioridad {live_guidance['priority']}")
+    elif live_guidance["status"] == "CONTRARIA":
+        st.warning(f"La dirección probable del mercado contradice la señal actual: {live_guidance['direction']} · prioridad {live_guidance['priority']}")
+    elif live_guidance["status"] == "PENDIENTE":
+        st.warning(f"Dirección aún pendiente: {live_guidance['direction']} · requiere seguimiento del movimiento")
+    if operating_signal["status"] == "PAPER_APTA_REVISION":
+        st.success("Estado operativo: PAPER APTA PARA REVISION. " + str(operating_signal["reasons"][0]))
+    elif operating_signal["status"] == "ESPERAR_VALIDACION":
+        st.info("Estado operativo: ESPERAR VALIDACION. " + str(operating_signal["reasons"][0]))
+    else:
+        st.error("Estado operativo: BLOQUEADA. " + " ".join(str(reason) for reason in operating_signal["reasons"]))
+    if current_signal["status"] == "APRENDIZAJE_ALINEADO":
+        st.success(f"Aprendizaje histórico alineado para {current_signal['strategy']}.")
+    elif current_signal["status"] == "APRENDIZAJE_CONTRARIO":
+        st.warning(f"El historial para {current_signal['strategy']} apunta en sentido contrario; requiere revisión.")
+    elif current_signal["status"] == "HISTORIAL_CONFLICTIVO":
+        st.warning(f"Hay conflicto histórico en la estrategia {current_signal['strategy']}; revisar antes de operar.")
+    elif current_signal["strategy"] == "SIN_ESTRATEGIA":
+        st.info("Todavía no hay evidencia histórica suficiente para certificar la estrategia en vivo.")
     st.json(report)
     reconciliation = report.get("market_data_reconciliation", {})
     if reconciliation:
@@ -1474,6 +2201,59 @@ def render_live_alerts() -> None:
             st.info("El historial fue ampliado o corregido después de esta alerta. La asesoría original permanece congelada.")
         else:
             st.warning("Esta asesoría antigua no contiene metadatos suficientes para auditoría.")
+    directional_signal = report.get("directional_learning_signal", {})
+    if isinstance(directional_signal, Mapping):
+        signal_status = str(directional_signal.get("status", "MUESTRA_INSUFICIENTE"))
+        if signal_status == "APRENDIZAJE_ALINEADO":
+            st.success(
+                "Aprendizaje histórico alineado con la dirección confirmada: "
+                f"{directional_signal.get('recommended_direction')}."
+            )
+        elif signal_status == "APRENDIZAJE_CONTRARIO":
+            st.warning(
+                "El historial suficiente apunta en dirección contraria; "
+                "requiere revisión humana antes de operar."
+            )
+        elif signal_status == "HISTORIAL_CONFLICTIVO":
+            st.warning("Las estrategias confirmadas muestran patrones históricos en conflicto.")
+        elif signal_status == "MUESTRA_INSUFICIENTE":
+            st.info("Aún no hay suficientes resultados confirmados para calibrar CALL/PUT.")
+        signal_rows = directional_signal.get("rows", [])
+        if signal_rows:
+            st.markdown("### Aprendizaje direccional por estrategia")
+            st.caption(str(directional_signal.get("disclaimer", "Evidencia histórica descriptiva.")))
+            if directional_signal.get("summary_score") is not None:
+                st.info(
+                    f"Certeza histórica agregada: {directional_signal.get('summary_score')}% · "
+                    f"prioridad {directional_signal.get('priority', 'MINIMA')}"
+                )
+            st.dataframe(pd.DataFrame([
+                {
+                    "Estrategia": row.get("strategy_id"),
+                    "Fuente": row.get("source"),
+                    "Dirección histórica": row.get("historical_direction") or "NO CALIBRADA",
+                    "Muestra": row.get("sample_size"),
+                    "Tasa positiva %": row.get("positive_rate"),
+                    "Límite inferior 95 %": row.get("interval_95_low"),
+                    "Certeza histórica %": row.get("confidence_score"),
+                    "Prioridad": row.get("priority", "MINIMA"),
+                }
+                for row in signal_rows
+            ]), width="stretch", hide_index=True)
+    automatic_signal = report.get("automatic_learning_signal", {})
+    if isinstance(automatic_signal, Mapping):
+        automatic_status = str(automatic_signal.get("status", "MUESTRA_INSUFICIENTE"))
+        if automatic_status == "APRENDIZAJE_ALINEADO":
+            st.success(
+                "Aprendizaje automático del movimiento posterior alineado con: "
+                f"{automatic_signal.get('recommended_direction')}."
+            )
+        elif automatic_status == "APRENDIZAJE_CONTRARIO":
+            st.warning("El movimiento histórico posterior contradice la dirección actual; requiere revisión.")
+        elif automatic_status == "HISTORIAL_CONFLICTIVO":
+            st.warning("El aprendizaje automático encuentra direcciones históricas conflictivas.")
+        elif automatic_status == "MUESTRA_INSUFICIENTE":
+            st.info("El aprendizaje automático todavía necesita más cierres posteriores de esta estrategia.")
     st.download_button(
         "Descargar alerta JSON",
         data=json.dumps(report, ensure_ascii=False, indent=2),
@@ -1503,7 +2283,7 @@ def render_live_alerts() -> None:
     )
     visual_indicators = st.multiselect(
         "Indicadores visibles declarados",
-        ["MA20", "MA40", "MA100", "MA200", "BOLLINGER", "VOLUME", "STOCHASTICS"],
+        ["MA20", "MA40", "MA100", "MA200", "BOLLINGER", "VOLUME", "STOCHASTICS", "WORDEN"],
         key=f"visual_indicators_{alert['id']}",
     )
     visual_notes = st.text_input(
@@ -1639,6 +2419,36 @@ def render_live_alerts() -> None:
             mime="application/json",
             key=f"download_visual_manifest_{alert['id']}",
         )
+    if any(str(item.get("strategy_id", "")).startswith("EFECTO_IMAN_")
+           for item in report.get("strategies", {}).get("evaluations", [])):
+        with st.expander("Revisión visual de Worden en Hora"):
+            st.caption("Registra lo que viste en TC2000. Esta observación conserva la señal original; no confirma automáticamente la estrategia.")
+            observed_default = datetime.fromisoformat(alert["trigger_timestamp"]).astimezone(ZoneInfo("America/New_York"))
+            observation_date = st.date_input("Fecha observada (ET)", value=observed_default.date(), key=f"worden_date_{alert['id']}")
+            observation_time = st.time_input("Hora observada (ET)", value=observed_default.time().replace(tzinfo=None), key=f"worden_time_{alert['id']}")
+            statuses = {"No puedo evaluarlo": "NO_EVALUABLE", "Observé el cruce de la línea roja": "CRUCE_OBSERVADO", "No observé el cruce": "SIN_CRUCE"}
+            observation_status = st.selectbox("Resultado visual", list(statuses), key=f"worden_status_{alert['id']}")
+            evidence_options = {"Sin captura": None}
+            evidence_options.update({f"Captura #{item['id']} de Hora": item["id"] for item in visual_evidence
+                                     if item["timeframe"] == "1H" and "WORDEN" in item["indicators_visible"]})
+            observation_evidence = st.selectbox("Captura de Hora con Worden", list(evidence_options), key=f"worden_evidence_{alert['id']}")
+            observation_notes = st.text_input("Notas de Worden", key=f"worden_notes_{alert['id']}")
+            worden_repository = WordenReviewRepository(AlertRepository().database_path)
+            if st.button("Guardar observación de Worden", key=f"save_worden_{alert['id']}"):
+                try:
+                    review_id = worden_repository.record(
+                        alert["id"], observed_at=datetime.combine(observation_date, observation_time, tzinfo=ZoneInfo("America/New_York")),
+                        status=statuses[observation_status], evidence_id=evidence_options[observation_evidence], notes=observation_notes,
+                    )
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    st.success(f"Observación #{review_id} guardada.")
+            observations = worden_repository.recent(alert["id"])
+            if observations:
+                st.dataframe(pd.DataFrame([{"ID": item["id"], "Hora observada": item["observed_at"], "Registrada": item["created_at"],
+                                            "Estado": item["status"], "Captura": item["evidence_id"], "Notas": item["notes"]}
+                                           for item in observations]), width="stretch", hide_index=True)
     st.markdown("### Acuse de alerta")
     acknowledgement_columns = st.columns(2)
     acknowledgement_status = acknowledgement_columns[0].selectbox(
@@ -3883,8 +4693,194 @@ def render_report_audit() -> None:
     )
 
 
+def render_telegram_connection() -> None:
+    from telegram_alerts import CONFIG_PATH, TelegramError, connection, discover, save_connection, send_test
+    st.subheader("Avisos a mi teléfono")
+    st.caption("Conecta tu bot de Telegram. La clave se guarda protegida por Windows en este equipo.")
+    st.markdown("**1 · Copia la clave de BotFather**")
+    st.caption("Busca el mensaje de creación del bot y copia la clave de HTTP API. Pégala solo en este campo privado.")
+    with st.form("telegram_discover"):
+        token = st.text_input("Clave privada del bot", type="password")
+        find = st.form_submit_button("Buscar mi chat de Telegram")
+    if find:
+        st.session_state.pop("telegram_pending", None)
+        try:
+            bot_name, chats = discover(token.strip())
+            st.session_state["telegram_pending"] = (token.strip(), bot_name, chats)
+        except TelegramError as error:
+            st.error(str(error))
+    pending = st.session_state.get("telegram_pending")
+    if pending:
+        pending_token, bot_name, chats = pending
+        st.markdown("**2 · Confirma tu chat**")
+        choice = st.selectbox("¿Cuál es tu chat?", range(len(chats)),
+                              format_func=lambda index: f"{chats[index]['name']} · @{chats[index]['username']} · {chats[index]['id']}")
+        if st.button("Vincular este chat"):
+            try:
+                save_connection(pending_token, bot_name, chats[choice])
+                st.session_state.pop("telegram_pending", None)
+                st.success("Chat vinculado. Ahora envía la prueba.")
+            except (TelegramError, OSError):
+                st.error("No se pudo guardar la conexión. Inténtalo de nuevo en este equipo Windows.")
+    saved = None
+    try:
+        saved = connection()
+        if saved:
+            st.success(f"Conectado a @{saved['bot_name']} · {saved['chat_name']}")
+            st.markdown("**3 · Comprueba que el mensaje llega a tu teléfono**")
+            if st.button("Enviar mensaje de prueba"):
+                send_test()
+                st.success("Telegram aceptó el mensaje. Comprueba que llegó y que tienes activadas las notificaciones del bot.")
+            if st.button("Desconectar Telegram"):
+                CONFIG_PATH.unlink(missing_ok=True)
+                st.session_state.pop("telegram_pending", None)
+                st.rerun()
+    except (TelegramError, OSError) as error:
+        st.error(str(error) if isinstance(error, TelegramError) else "No se pudo leer la conexión guardada.")
+    from bollinger_phone_worker import STATUS_PATH, enabled, set_enabled
+    st.markdown("**Avisos tempranos · Bollinger en 15 minutos**")
+    st.caption("Avisa al salir por la banda superior o inferior, con ambas bandas abriéndose y el punto medio acompañando. Un aviso por compañía, vela y dirección. No espera la aprobación PAPER.")
+    if saved:
+        if enabled():
+            st.success("Avisos de Bollinger habilitados.")
+            if st.button("Pausar avisos de Bollinger"):
+                set_enabled(False)
+                st.rerun()
+        elif st.button("Activar avisos de Bollinger"):
+            set_enabled(True)
+            st.rerun()
+    try:
+        radar = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+        heartbeat = datetime.fromisoformat(radar["heartbeat"])
+        if datetime.now(timezone.utc) - heartbeat > timedelta(seconds=30):
+            st.warning("El servicio de avisos no está respondiendo. No se garantiza la entrega de alertas.")
+        else:
+            radar_labels = {"VIGILANDO": "Radar vigilando los datos del buscador", "FUERA_DE_SESION": "Radar activo, esperando la apertura del mercado", "PAUSADO": "Avisos pausados", "SIN_DATOS_RECIENTES": "Sin datos recientes: revisa que el buscador esté corriendo", "ERROR": "El radar necesita revisión"}
+            st.info(radar_labels.get(radar["state"], radar["state"]))
+            if radar.get("errors"):
+                st.warning("Telegram no confirmó algún envío. Revisa la conexión antes de confiar en los avisos.")
+    except (OSError, ValueError, KeyError):
+        st.warning("El servicio de avisos aún no ha informado su estado.")
+    st.caption("El equipo y el buscador deben permanecer encendidos y conectados. Se revisan barras de un minuto; Telegram e Internet pueden añadir demora. Las alertas no garantizan acierto.")
+
+
+def render_paper_entry_validation() -> None:
+    st.subheader("¿Está lista esta señal para practicar?")
+    st.info("Selecciona una señal, responde tres preguntas y escribe tu plan. La app comprobará lo demás y te dirá si puedes practicar o qué falta resolver.")
+    st.caption("PAPER significa simulación: no usa dinero real ni envía órdenes. Una aprobación no garantiza ganancias.")
+    repository = AlertRepository()
+    alerts = repository.recent(limit=100)
+    if not alerts:
+        st.info("Todavía no hay alertas para revisar.")
+        return
+    labels = {f"#{item['id']} · {item['symbol']} · {_market_event_local_time(item['trigger_timestamp'])}": item for item in alerts}
+    st.markdown("**Paso 1 · Elige la señal que quieres revisar**")
+    alert = labels[st.selectbox("Compañía y hora de la señal", list(labels), key="paper_validation_alert")]
+    report = alert["report"]
+    research_path = Path(__file__).resolve().parent / "exports" / "strategy_research" / "latest.json"
+    try:
+        research = json.loads(research_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        research = {}
+    now = datetime.now(timezone.utc)
+    evidence = entry_evidence(alert, research, as_of=now)
+    st.markdown("**¿Qué ha observado la app en movimientos parecidos?**")
+    favorable_count = sum(item["status"] == "EVIDENCIA_FAVORABLE" for item in evidence["rows"])
+    if evidence["rows"] and favorable_count == len(evidence["rows"]):
+        st.success("El historial cumple el filtro de resultados favorables. Todavía faltan las comprobaciones de esta entrada.")
+    elif any(item["status"] == "MUESTRA_INSUFICIENTE" for item in evidence["rows"]):
+        st.info("La app necesita observar más resultados antes de aprobar esta señal por su historial.")
+    elif evidence["rows"]:
+        st.warning("Los resultados anteriores todavía no cumplen el filtro para aprobar esta señal.")
+    if evidence["rows"]:
+        with st.expander("Ver números y detalles del historial"):
+            st.dataframe(pd.DataFrame([{"Estrategia": item["strategy_id"], "Dirección": item["bias"], "Muestra": item["sample_size"],
+                                   "Sesiones": item["session_count"], "Positivos %": item["positive_rate_pct"],
+                                   "Retorno medio %": item["average_directional_return_pct"], "Estado": item["status"]}
+                                  for item in evidence["rows"]]), width="stretch", hide_index=True)
+    else:
+        st.info("No hay una estrategia confirmada con evidencia para esta señal.")
+    st.caption("Se comparan movimientos anteriores de la misma estrategia y dirección. Estos resultados no predicen el próximo movimiento.")
+    candidates = {"Sin contrato elegible": None}
+    candidates.update({item["symbol"]: item for item in report.get("option_selection", {}).get("candidates", []) if item.get("eligible") is True})
+    with st.form(f"paper_entry_form_{alert['id']}"):
+        st.markdown("**Paso 2 · Confirma lo que revisaste**")
+        st.caption("Si no sabes la respuesta, selecciona «No lo he revisado». La app mantendrá la entrada pendiente.")
+        options = {"No lo he revisado": None, "Sí, lo revisé y cumple": True, "No, encontré un problema": False}
+        path = options[st.selectbox("¿El precio tiene espacio para avanzar hacia tu objetivo?", list(options), help="Revisa si hay soportes o resistencias cercanos que puedan frenar el movimiento.")]
+        news = options[st.selectbox("¿Revisaste las noticias y no encontraste algo que contradiga la entrada?", list(options))]
+        panorama = options[st.selectbox("¿El movimiento general del mercado acompaña esta señal?", list(options))]
+        st.markdown("**Paso 3 · Elige el contrato y escribe tu plan**")
+        contract_label = st.selectbox("Contrato de opciones disponible para practicar", list(candidates), help="La app solo permite seleccionar contratos que pasaron su evaluación. La cotización también debe estar vigente.")
+        if len(candidates) == 1:
+            st.info("Falta un contrato con precio actualizado y riesgo evaluado. Puedes guardar tu revisión, pero la entrada seguirá bloqueada hasta contar con ese dato.")
+        entry_plan = st.text_area("¿Cuándo entrarías y qué te haría cancelar la entrada?", placeholder="Escribe el precio o condición de entrada y el nivel que invalidaría tu idea.")
+        exit_plan = st.text_area("¿Cuándo saldrías?", placeholder="Escribe tu objetivo y cuándo cerrarías si el movimiento va en contra.")
+        with st.expander("Límites de tu plan y notas"):
+            weekly_count = st.number_input("¿Cuántas entradas nuevas llevas esta semana?", min_value=0, step=1)
+            watchlist = st.text_input("Compañías que autorizaste para practicar", value=alert["symbol"], help="Separa los símbolos con comas. La compañía de esta señal debe estar incluida.")
+            notes = st.text_area("Notas de lo que revisaste (opcional)")
+        st.caption("Comprueba los límites de tu plan antes de continuar. La revisión se guardará para esta señal.")
+        submitted = st.form_submit_button("Comprobar si puedo practicar")
+    if submitted:
+        try:
+            review_id = repository.record_human_review(alert["id"], path_clear=path, news_clear=news, panorama_approved=panorama, notes=notes)
+            repository.record_governance_review(alert["id"], GovernanceRequest(
+                mode=TradingMode.PAPER, workflow=OperationWorkflow.NUEVA_ENTRADA,
+                watchlist_symbols=tuple(item.strip() for item in watchlist.split(",") if item.strip()),
+                new_trades_this_week=int(weekly_count), entry_plan=entry_plan, exit_plan=exit_plan, symbol=alert["symbol"]), notes=notes)
+            if candidates[contract_label] is not None:
+                repository.record_contract_selection(alert["id"], contract_label, notes=notes)
+            contracts = repository.contract_selections(alert["id"])
+            contract = contracts[0] if contracts and candidates[contract_label] is not None else None
+            validated_at = datetime.now(timezone.utc)
+            session = MarketSessionRepository(repository.database_path).session(validated_at.astimezone(ZoneInfo("America/New_York")).date())
+            payload = validate_paper_entry(alert, repository.human_reviews(alert["id"])[0], contract,
+                                          repository.governance_reviews(alert["id"])[0],
+                                          VisualEvidenceRepository(repository.database_path).audit(alert["id"]), research,
+                                          as_of=validated_at, session=session)
+            validation_id = repository.record_reevaluation(alert["id"], review_id, payload)
+            st.session_state[f"paper_validation_result_{alert['id']}"] = (validation_id, payload)
+        except (ValueError, OSError) as error:
+            st.error(str(error))
+    saved = st.session_state.get(f"paper_validation_result_{alert['id']}")
+    if saved:
+        validation_id, payload = saved
+        assessment = payload["paper_entry_validation"]
+        if assessment["status"] == "APROBADA_PAPER":
+            current_time = datetime.now(timezone.utc)
+            original_time = datetime.fromisoformat(alert["trigger_timestamp"])
+            current_session = MarketSessionRepository(repository.database_path).session(current_time.astimezone(ZoneInfo("America/New_York")).date())
+            if current_time - original_time > timedelta(minutes=3) or current_session is None or not current_session.opens_at <= current_time < current_session.closes_at:
+                st.warning(f"La aprobación #{validation_id} es un registro anterior y ya no está vigente. Valida una señal actual.")
+            else:
+                st.success(f"Lista para practicar en simulación · {payload['decision']['decision']}. Aprobada al momento de esta revisión.")
+        else:
+            st.warning("Todavía no está lista para practicar. Resuelve los puntos siguientes y vuelve a comprobar.")
+            st.markdown("**Qué falta resolver**")
+            for blocker in assessment["blockers"]:
+                st.write("• " + blocker)
+        st.caption("Resultado guardado con fecha, revisiones y evidencia. No permanece vigente indefinidamente.")
+
+
 def main() -> None:
     """Construye la navegación principal de la aplicación."""
+    st.markdown("""<style>
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background-color: #08111f !important; color: #e8eef7 !important;
+    }
+    [data-testid="stHeader"] {background-color: #08111f !important;}
+    [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2,
+    [data-testid="stMarkdownContainer"] h3, [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"], [data-testid="stWidgetLabel"] {
+        color: #e8eef7 !important;
+    }
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
+        color: #a8b8ce !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {border-color: #29405c !important;}
+    </style>""", unsafe_allow_html=True)
     st.title("JJTrade AI")
     st.caption("Metodología Investep · decisión asistida · ejecución humana")
     if "risk_status" not in st.session_state:
@@ -3903,36 +4899,12 @@ def main() -> None:
         st.session_state["governance_watchlist"] = ()
     if "governance_workflow" not in st.session_state:
         st.session_state["governance_workflow"] = None
-    with st.sidebar:
-        st.markdown("### Estado de sesión")
-        st.caption(f"JJTrade AI {APP_VERSION}")
-        st.write(f"Metodología: `{METHODOLOGY_VERSION}`")
-        st.write(f"Riesgo: **{st.session_state['risk_status'].value}**")
-        st.write(
-            "Plan operativo: "
-            f"**{st.session_state['governance_status'].value}**"
-        )
-        if st.button("Reiniciar aprobaciones"):
-            for key in (
-                "risk_status",
-                "governance_status",
-            ):
-                st.session_state[key] = GateStatus.NO_DISPONIBLE
-            for key in (
-                "risk_symbol",
-                "risk_option_type",
-                "risk_fingerprint",
-                "risk_evaluation",
-                "governance_fingerprint",
-                "governance_evaluation",
-                "governance_watchlist",
-                "governance_workflow",
-            ):
-                st.session_state[key] = None
-            st.rerun()
-    simple_tab, risk_tab, governance_tab, journal_tab, analysis_tab, audit_tab = st.tabs(
+    simple_tab, phone_tab, validation_tab, research_tab, risk_tab, governance_tab, journal_tab, analysis_tab, audit_tab = st.tabs(
         [
-            "Movimientos-Estrategias",
+            "Bollinger en vivo",
+            "Avisos a mi teléfono",
+            "Validar entrada PAPER",
+            "Seguimiento de resultados",
             "Riesgo de opciones",
             "Plan operativo",
             "Diario",
@@ -3941,7 +4913,13 @@ def main() -> None:
         ]
     )
     with simple_tab:
-        render_operational_dashboard()
+        render_bollinger_dashboard()
+    with validation_tab:
+        st.info("Las validaciones de entrada quedan fuera del enfoque actual. Primero estamos comprobando la salida de Bollinger y la continuidad del movimiento. Consulta Bollinger en vivo y Seguimiento de resultados.")
+    with phone_tab:
+        render_telegram_connection()
+    with research_tab:
+        _render_strategy_research()
     with risk_tab:
         render_risk()
     with governance_tab:

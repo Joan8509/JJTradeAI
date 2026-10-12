@@ -3,10 +3,39 @@
 import unittest
 from datetime import datetime, timezone
 
-from learning_engine import LearningPolicy, TemporalValidationPolicy, audit_learning_advisory, build_learning_advisory, evaluate_temporal_stability, summarize_alert_feedback, summarize_context_performance, summarize_strategy_performance
+from learning_engine import LearningPolicy, TemporalValidationPolicy, audit_learning_advisory, build_directional_learning_signal, build_learning_advisory, evaluate_temporal_stability, summarize_alert_feedback, summarize_context_performance, summarize_strategy_performance
 
 
 class LearningEngineTests(unittest.TestCase):
+    def test_directional_signal_uses_only_prior_confirmed_outcomes(self) -> None:
+        records = []
+        for index in range(10):
+            records.append({
+                "strategies": ["CT15"], "mode": "PAPER", "trade_taken": True,
+                "result": "POSITIVO", "decision": "CALL", "methodology_version": "1.0",
+                "created_at": f"2026-01-{index + 2:02d}T12:00:00+00:00",
+                "event_at": f"2026-01-{index + 2:02d}T10:00:00+00:00",
+                "context": {"trend_15m": "ALCISTA"},
+            })
+        records.append({
+            "strategies": ["CT15"], "mode": "PAPER", "trade_taken": True,
+            "result": "POSITIVO", "decision": "PUT", "methodology_version": "1.0",
+            "created_at": "2026-01-20T12:00:00+00:00", "event_at": "2026-01-20T10:00:00+00:00",
+            "context": {"trend_15m": "ALCISTA"},
+        })
+
+        signal = build_directional_learning_signal(
+            records, strategy_ids=["CT15"], context={"trend_15m": "ALCISTA"},
+            current_direction="CALL", as_of=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            methodology_version="1.0", minimum_sample_size=10,
+        )
+
+        row = signal["rows"][0]
+        self.assertEqual(signal["status"], "APRENDIZAJE_ALINEADO")
+        self.assertEqual(signal["recommended_direction"], "CALL")
+        self.assertEqual(row["source"], "CONTEXTO")
+        self.assertEqual(row["call"]["sample_size"], 10)
+
     def test_metrics_remain_uncalibrated_without_approved_sample_policy(self) -> None:
         records = [
             {
@@ -169,6 +198,32 @@ class LearningEngineTests(unittest.TestCase):
         self.assertEqual(advisory["policy_version"], "LEARNING_ADVISORY_V2")
         self.assertEqual(len(advisory["history_fingerprint_sha256"]), 64)
         self.assertEqual(advisory["source_outcome_ids"], [1, 3])
+
+    def test_directional_signal_includes_confidence_score_and_priority(self) -> None:
+        records = []
+        for index in range(12):
+            records.append({
+                "strategies": ["CT15"], "mode": "PAPER", "trade_taken": True,
+                "result": "POSITIVO" if index < 10 else "NEGATIVO",
+                "decision": "CALL" if index < 10 else "PUT",
+                "methodology_version": "1.0",
+                "created_at": f"2026-01-{index + 2:02d}T12:00:00+00:00",
+                "event_at": f"2026-01-{index + 2:02d}T10:00:00+00:00",
+                "context": {"trend_15m": "ALCISTA", "relative_volatility_15m": "NORMAL", "session_segment": "MEDIA_SESION", "benchmark_regime": "ALCISTA", "benchmark_alignment": "ALINEADO", "benchmark_synchronization": "COMPLETA"},
+            })
+
+        signal = build_directional_learning_signal(
+            records, strategy_ids=["CT15"], context={"trend_15m": "ALCISTA", "relative_volatility_15m": "NORMAL", "session_segment": "MEDIA_SESION", "benchmark_regime": "ALCISTA", "benchmark_alignment": "ALINEADO", "benchmark_synchronization": "COMPLETA"},
+            current_direction="CALL", as_of=datetime(2026, 2, 1, tzinfo=timezone.utc),
+            methodology_version="1.0", minimum_sample_size=10,
+        )
+
+        self.assertIn("summary_score", signal)
+        self.assertGreater(signal["summary_score"], 70)
+        self.assertIn("priority", signal)
+        self.assertEqual(signal["priority"], "ALTA")
+        self.assertGreater(signal["rows"][0]["confidence_score"], 70)
+        self.assertEqual(signal["rows"][0]["priority"], "ALTA")
 
     def test_learning_advisory_requires_timezone(self) -> None:
         with self.assertRaisesRegex(ValueError, "zona horaria"):

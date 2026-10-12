@@ -1,4 +1,6 @@
 import tempfile
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
@@ -9,6 +11,7 @@ from live_strategy_service import AlertRepository
 from market_store import MarketBarStore
 from paper_signal_evaluator import (
     PaperSignalEvaluationRepository,
+    build_paper_directional_learning_signal,
     build_paper_signal_advisory,
     evaluate_available_signals,
 )
@@ -72,6 +75,49 @@ class PaperSignalEvaluatorTests(unittest.TestCase):
         result = evaluate_available_signals(self.database, horizons=(15,))
         self.assertEqual(result["summary"][0]["correct_count"], 1)
         self.assertGreater(result["summary"][0]["average_directional_return_pct"], 0)
+
+    def test_automatic_learning_signal_rejects_small_sample(self):
+        self.add_bars([(0, 100), (60, 102)])
+        self.add_alert()
+        evaluate_available_signals(self.database, horizons=(60,))
+
+        signal = build_paper_directional_learning_signal(
+            self.database, strategy_ids=("TEST_STRATEGY",), current_direction="CALL",
+            as_of=START + timedelta(minutes=61), methodology_version="test-1",
+            horizon_minutes=60, minimum_sample_size=1,
+        )
+
+        self.assertEqual(signal["status"], "MUESTRA_INSUFICIENTE")
+        self.assertIsNone(signal["recommended_direction"])
+
+    def test_directional_learning_only_uses_evidence_known_at_alert_time(self):
+        self.add_bars([(0, 100), (60, 102)])
+        self.add_alert()
+        evaluate_available_signals(self.database, horizons=(60,))
+        known_at = START + timedelta(minutes=90)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE paper_signal_evaluations SET evaluated_at=?",
+                (known_at.isoformat(),),
+            )
+            connection.commit()
+
+        for as_of, expected_size in (
+            (START + timedelta(minutes=59), 0),
+            (START + timedelta(minutes=61), 0),
+            (known_at, 1),
+        ):
+            with self.subTest(as_of=as_of):
+                signal = build_paper_directional_learning_signal(
+                    self.database, strategy_ids=("TEST_STRATEGY",),
+                    current_direction="CALL", as_of=as_of,
+                    methodology_version="test-1", horizon_minutes=60,
+                    minimum_sample_size=1,
+                )
+                self.assertEqual(
+                    signal["rows"][0]["call"]["sample_size"],
+                    expected_size,
+                )
 
     def test_pending_horizon_is_not_fabricated(self):
         self.add_bars([(0, 100), (10, 102)])

@@ -400,7 +400,7 @@ class LiveStrategyServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = AlertRepository(Path(directory) / "alerts.db")
             payload = report("SPY")
-            payload["strategies"] = {"evaluations": [{"strategy_id": "CT15", "detected": True}]}
+            payload["strategies"] = {"evaluations": [{"strategy_id": "CT15", "detected": True, "required_criteria_satisfied": True}]}
             alert_id = repository.record(provider="ALPACA", feed="iex", symbol="SPY", trigger_timestamp=START, report=payload)
             review_id = repository.record_human_review(alert_id, path_clear=True, news_clear=True, panorama_approved=True)
             reevaluation_id = repository.record_reevaluation(

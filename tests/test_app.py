@@ -17,7 +17,12 @@ from app import (
     _audit_summary_table,
     _closed_trade_comparison_table,
     _compact_operational_card,
+    _current_strategy_certainty,
     _current_live_previews,
+    _alert_live_certainty_rank,
+    _lead_live_signal,
+    _live_direction_guidance,
+    _operating_signal_status,
     _closed_trades_table,
     _data_source_table,
     _effective_common_news_review,
@@ -35,6 +40,7 @@ from app import (
     _operator_board_upload_table,
     _operational_notification,
     _paper_evidence_checks_table,
+    _preview_confidence_badge,
     _reevaluation_outcome_mode,
     _report_audits_table,
     _review_queue_upload_table,
@@ -128,6 +134,153 @@ class StreamlitAppTests(unittest.TestCase):
         )
 
         self.assertIn("1H", card["title"])
+
+    def test_preview_confidence_badge_prioritizes_strongest_signal(self) -> None:
+        badge = _preview_confidence_badge({
+            "directional_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "rows": [{
+                    "strategy_id": "BOLLINGER_FIJO_CALL",
+                    "confidence_score": 91.0,
+                    "priority": "ALTA",
+                    "historical_direction": "CALL",
+                }],
+            },
+        })
+
+        self.assertEqual(badge["label"], "ALTA")
+        self.assertEqual(badge["priority"], "ALTA")
+        self.assertEqual(badge["confidence_pct"], 91)
+        self.assertEqual(badge["tone"], "high")
+
+    def test_current_strategy_certainty_prefers_automatic_learning_when_stronger(self) -> None:
+        signal = _current_strategy_certainty({
+            "directional_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "rows": [{
+                    "strategy_id": "CT15_ALCISTA",
+                    "confidence_score": 58.0,
+                    "priority": "MEDIA",
+                    "historical_direction": "CALL",
+                }],
+            },
+            "automatic_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "summary_score": 88.0,
+                "priority": "ALTA",
+                "recommended_direction": "CALL",
+                "rows": [{
+                    "strategy_id": "CT15_ALCISTA",
+                    "confidence_score": 88.0,
+                    "priority": "ALTA",
+                    "historical_direction": "CALL",
+                }],
+            },
+        })
+
+        self.assertEqual(signal["strategy"], "CT15_ALCISTA")
+        self.assertEqual(signal["confidence"], 88.0)
+        self.assertEqual(signal["priority"], "ALTA")
+        self.assertEqual(signal["status"], "APRENDIZAJE_ALINEADO")
+
+    def test_live_direction_guidance_uses_automatic_signal_when_confirmed(self) -> None:
+        guidance = _live_direction_guidance({
+            "decision": {"decision": "PUT"},
+            "automatic_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "recommended_direction": "PUT",
+                "summary_score": 87.0,
+            },
+            "directional_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "recommended_direction": "PUT",
+                "rows": [{"confidence_score": 71.0, "priority": "MEDIA"}],
+            },
+        })
+
+        self.assertEqual(guidance["direction"], "PUT")
+        self.assertEqual(guidance["status"], "CONFIRMADA")
+        self.assertGreaterEqual(guidance["confidence_pct"], 80)
+
+    def test_alert_live_certainty_rank_prefers_automatic_learning_signal(self) -> None:
+        item = {
+            "id": 8,
+            "report": {
+                "automatic_learning_signal": {
+                    "status": "APRENDIZAJE_ALINEADO",
+                    "summary_score": 88.0,
+                    "rows": [{"strategy_id": "CT15_ALCISTA", "confidence_score": 88.0, "priority": "ALTA"}],
+                },
+                "directional_learning_signal": {
+                    "status": "APRENDIZAJE_ALINEADO",
+                    "rows": [{"strategy_id": "CT15_ALCISTA", "confidence_score": 55.0, "priority": "MEDIA"}],
+                },
+            },
+        }
+
+        ranking = _alert_live_certainty_rank(item)
+        self.assertEqual(ranking[0], 88.0)
+        self.assertEqual(ranking[1], 3)
+
+    def test_lead_live_signal_prioritizes_strongest_direction(self) -> None:
+        lead = _lead_live_signal([
+            {"report": {"automatic_learning_signal": {"status": "APRENDIZAJE_ALINEADO", "recommended_direction": "PUT", "summary_score": 61.0}}},
+            {"report": {"automatic_learning_signal": {"status": "APRENDIZAJE_ALINEADO", "recommended_direction": "CALL", "summary_score": 90.0}}},
+        ])
+
+        self.assertEqual(lead["direction"], "CALL")
+        self.assertEqual(lead["status"], "CONFIRMADA")
+        self.assertEqual(lead["confidence_pct"], 90)
+
+    def test_lead_live_signal_downgrades_contrary_movement_even_if_score_is_high(self) -> None:
+        lead = _lead_live_signal([
+            {"report": {"automatic_learning_signal": {"status": "APRENDIZAJE_CONTRARIO", "recommended_direction": "PUT", "summary_score": 92.0}}},
+            {"report": {"automatic_learning_signal": {"status": "APRENDIZAJE_ALINEADO", "recommended_direction": "CALL", "summary_score": 72.0}}},
+        ])
+
+        self.assertEqual(lead["direction"], "CALL")
+        self.assertEqual(lead["status"], "PROBABLE")
+        self.assertEqual(lead["confidence_pct"], 72)
+
+    def test_operating_signal_waits_for_automatic_confirmation(self) -> None:
+        result = _operating_signal_status({
+            "decision": {"decision": "CALL"},
+            "automatic_learning_signal": {
+                "status": "MUESTRA_INSUFICIENTE",
+                "summary_score": 0,
+            },
+        })
+
+        self.assertEqual(result["status"], "ESPERAR_VALIDACION")
+        self.assertTrue(result["paper_only"])
+        self.assertFalse(result["real_trading_authorized"])
+
+    def test_operating_signal_allows_only_paper_review_after_strong_alignment(self) -> None:
+        result = _operating_signal_status({
+            "decision": {"decision": "CALL"},
+            "live_data_freshness": {"status": "APROBADO"},
+            "market_data_reconciliation": {"status": "APROBADO"},
+            "automatic_learning_signal": {
+                "status": "APRENDIZAJE_ALINEADO",
+                "recommended_direction": "CALL",
+                "summary_score": 84,
+            },
+        })
+
+        self.assertEqual(result["status"], "PAPER_APTA_REVISION")
+        self.assertFalse(result["real_trading_authorized"])
+
+    def test_operating_signal_blocks_contrary_direction(self) -> None:
+        result = _operating_signal_status({
+            "decision": {"decision": "CALL"},
+            "automatic_learning_signal": {
+                "status": "APRENDIZAJE_CONTRARIO",
+                "recommended_direction": "PUT",
+                "summary_score": 90,
+            },
+        })
+
+        self.assertEqual(result["status"], "BLOQUEADA")
 
     def test_feed_comparison_summary_distinguishes_match_and_divergence(self) -> None:
         matching = _feed_comparison_summary({
@@ -279,6 +432,14 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertEqual(active["label"], "REVISAR AHORA")
         self.assertEqual(active["local_time"], "2026-08-07 10:45 AM ET")
         self.assertEqual(stopped["status"], "HISTORICA")
+
+    def test_closed_session_blocks_fresh_actionable_signal_with_scanner_running(self) -> None:
+        now = datetime(2026, 10, 8, 20, 1, tzinfo=timezone.utc)
+        summary = {"trigger_timestamp": "2026-10-08T19:59:00+00:00", "can_operate": True,
+                   "paper_only": True, "decision": "CALL", "setup_status": "CONFIRMADA"}
+        result = _simple_moment_status(summary, scanner_active=True, market_open=False, now=now)
+        self.assertEqual(result["status"], "HISTORICA")
+        self.assertEqual(result["label"], "SESION FINALIZADA")
 
     def test_simple_moment_status_expires_old_signal(self) -> None:
         summary = {
@@ -989,6 +1150,15 @@ class StreamlitAppTests(unittest.TestCase):
 
     def test_effective_common_news_review_uses_fallback_when_missing(self) -> None:
         self.assertFalse(_effective_common_news_review({}, False))
+
+    def test_bollinger_dashboard_excludes_stale_future_and_closed_session_states(self) -> None:
+        from app import _bollinger_state_is_current
+        now = datetime(2026, 10, 9, 14, 0, tzinfo=timezone.utc)
+        current = {"source_timestamp": "2026-10-09T13:59:00+00:00"}
+        self.assertTrue(_bollinger_state_is_current(current, now=now, market_open=True))
+        self.assertFalse(_bollinger_state_is_current(current, now=now, market_open=False))
+        self.assertFalse(_bollinger_state_is_current({"source_timestamp": "2026-10-09T13:55:00+00:00"}, now=now, market_open=True))
+        self.assertFalse(_bollinger_state_is_current({"source_timestamp": "2026-10-09T14:01:00+00:00"}, now=now, market_open=True))
 
     def test_app_renders_without_exceptions(self) -> None:
         app_path = Path(__file__).resolve().parents[1] / "app.py"

@@ -1,0 +1,11 @@
+{
+  "status": "OK",
+  "source_count": 77,
+  "finding_count": 0,
+  "findings": [],
+  "paper_only": true,
+  "order_execution": false,
+  "learning_isolated": true,
+  "learning_authority": "DESCRIPTIVA_NO_INFLUYE_DECISION",
+  "authority": "INVARIANTES_ESTATICOS_NO_EJECUTAN_ORDENES"
+}

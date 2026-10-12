@@ -152,6 +152,10 @@ def attach_strategy_preview(
     generic_exposures = {
         "EXPUESTO_BOLLINGER_INFERIOR", "EXPUESTO_BOLLINGER_SUPERIOR",
     }
+    strong_bollinger_push = {
+        "EXPUESTO_BOLLINGER_INFERIOR": "PUT",
+        "EXPUESTO_BOLLINGER_SUPERIOR": "CALL",
+    }
     methodology_biases = {
         str(item.get("bias"))
         for item in detected
@@ -165,11 +169,15 @@ def attach_strategy_preview(
             item["bias"] = "ESPERAR"
             item["direction_status"] = "EN FORMACION - REQUIERE CONFIRMACION"
         elif strategy_id in generic_exposures:
+            probable_bias = strong_bollinger_push.get(strategy_id, "ESPERAR")
             item["bias"] = "ESPERAR"
-            item["direction_status"] = "SIN DIRECCIÓN CONFIRMADA"
+            item["potential_bias"] = probable_bias
+            item["direction_status"] = (
+                f"PROBABLE {probable_bias} - SIN DIRECCIÓN CONFIRMADA"
+            )
             item["next_requirement"] = (
-                "La exposición sola no define CALL o PUT; esperar la "
-                "confirmación completa de una estrategia."
+                "La exposición es fuerte y sugiere una dirección probable, "
+                "pero aún no está confirmada por una estrategia metodológica."
             )
         elif directional_conflict:
             item["bias"] = "ESPERAR"

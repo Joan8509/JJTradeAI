@@ -121,6 +121,91 @@ def build_paper_signal_advisory(
     }
 
 
+def build_paper_directional_learning_signal(
+    database_path: str | Path,
+    *,
+    strategy_ids: Iterable[str],
+    current_direction: str,
+    as_of: datetime,
+    methodology_version: str,
+    horizon_minutes: int = 60,
+    minimum_sample_size: int = 20,
+) -> dict[str, Any]:
+    """Aprende la dirección con evaluaciones PAPER generadas automáticamente."""
+    if as_of.tzinfo is None:
+        raise ValueError("as_of debe incluir zona horaria.")
+    if horizon_minutes <= 0 or minimum_sample_size <= 0:
+        raise ValueError("Horizonte y muestra minima deben ser positivos.")
+    normalized_direction = current_direction.strip().upper()
+    requested = tuple(sorted({str(item).strip() for item in strategy_ids if str(item).strip()}))
+    rows: list[dict[str, Any]] = []
+    if normalized_direction not in {"CALL", "PUT"} or not requested:
+        return {
+            "status": "NO_DIRECCIONAL", "recommended_direction": None,
+            "current_direction": normalized_direction, "rows": [],
+            "horizon_minutes": horizon_minutes, "minimum_sample_size": minimum_sample_size,
+            "authority": "DESCRIPTIVA_PAPER_NO_MODIFICA_DECISION",
+        }
+    with closing(sqlite3.connect(database_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        placeholders = ",".join("?" for _ in requested)
+        evidence = connection.execute(
+            "SELECT strategy_id, bias, result, directional_return_pct "
+            "FROM paper_signal_evaluations "
+            f"WHERE strategy_id IN ({placeholders}) AND horizon_minutes=? "
+            "AND methodology_version=? AND evaluated_at<=? AND exit_timestamp<=?",
+            (*requested, horizon_minutes, methodology_version.strip(),
+             as_of.astimezone(timezone.utc).isoformat(),
+             as_of.astimezone(timezone.utc).isoformat()),
+        ).fetchall()
+    calibrated_directions: set[str] = set()
+    for strategy_id in requested:
+        by_direction = {}
+        for direction in ("CALL", "PUT"):
+            items = [item for item in evidence if item["strategy_id"] == strategy_id and item["bias"] == direction]
+            wins = sum(item["result"] == "CORRECTA" for item in items)
+            low, high = _wilson_interval(wins, len(items))
+            average = sum(float(item["directional_return_pct"]) for item in items) / len(items) if items else None
+            by_direction[direction] = {
+                "direction": direction, "sample_size": len(items), "correct_count": wins,
+                "correct_rate": round(wins / len(items) * 100, 2) if items else None,
+                "interval_95_low": round(low * 100, 2), "interval_95_high": round(high * 100, 2),
+                "average_directional_return_pct": round(average, 4) if average is not None else None,
+            }
+        ranked = sorted(by_direction.values(), key=lambda item: (item["interval_95_low"], item["correct_rate"] or 0), reverse=True)
+        best = ranked[0]
+        calibrated = best["sample_size"] >= minimum_sample_size and best["interval_95_low"] >= 50.0 and (best["average_directional_return_pct"] or 0) > 0
+        confidence_score, priority = (0.0, "MINIMA") if not calibrated else (round((best["interval_95_low"] * 0.7) + (min(best["sample_size"] / max(minimum_sample_size, 1), 1.0) * 30.0), 2), "ALTA" if best["interval_95_low"] >= 80 else "MEDIA" if best["interval_95_low"] >= 60 else "BAJA")
+        if calibrated:
+            calibrated_directions.add(best["direction"])
+        rows.append({
+            "strategy_id": strategy_id, "historical_direction": best["direction"] if calibrated else None,
+            "calibrated": calibrated, "confidence_score": confidence_score, "priority": priority,
+            "call": by_direction["CALL"], "put": by_direction["PUT"],
+        })
+    if not calibrated_directions:
+        status, recommendation = "MUESTRA_INSUFICIENTE", None
+        summary_score = 0.0
+        summary_priority = "MINIMA"
+    elif len(calibrated_directions) > 1:
+        status, recommendation = "HISTORIAL_CONFLICTIVO", None
+        summary_score = round(sum(row["confidence_score"] for row in rows if row["calibrated"]) / max(1, sum(1 for row in rows if row["calibrated"])), 2)
+        summary_priority = "ALTA" if summary_score >= 80 else "MEDIA" if summary_score >= 60 else "BAJA"
+    else:
+        recommendation = next(iter(calibrated_directions))
+        status = "APRENDIZAJE_ALINEADO" if recommendation == normalized_direction else "APRENDIZAJE_CONTRARIO"
+        summary_score = round(sum(row["confidence_score"] for row in rows if row["calibrated"]) / max(1, sum(1 for row in rows if row["calibrated"])), 2)
+        summary_priority = "ALTA" if summary_score >= 80 else "MEDIA" if summary_score >= 60 else "BAJA"
+    return {
+        "status": status, "recommended_direction": recommendation,
+        "current_direction": normalized_direction, "horizon_minutes": horizon_minutes,
+        "minimum_sample_size": minimum_sample_size, "summary_score": summary_score,
+        "priority": summary_priority, "rows": rows,
+        "authority": "DESCRIPTIVA_PAPER_NO_MODIFICA_DECISION",
+        "disclaimer": "Aprendizaje automático sobre el movimiento posterior del subyacente; no garantiza el próximo movimiento ni autoriza órdenes.",
+    }
+
+
 def _utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     if parsed.tzinfo is None:

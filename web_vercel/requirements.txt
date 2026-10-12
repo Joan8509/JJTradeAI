@@ -1,0 +1,1 @@
+# La función web utiliza únicamente la biblioteca estándar de Python.

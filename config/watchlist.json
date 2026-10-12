@@ -1,7 +1,7 @@
 {
   "symbols": [
     "AAPL", "NVDA", "TSLA", "AMD", "META", "MSFT", "BABA", "SPY",
-    "QQQ", "IWM", "DIA", "MU", "NIO", "GLD", "AMZN", "NFLX"
+    "QQQ", "IWM", "DIA", "MU", "NIO", "GLD", "AMZN", "NFLX", "AVGO"
   ],
   "benchmarks": ["SPY", "QQQ", "IWM", "DIA"]
 }

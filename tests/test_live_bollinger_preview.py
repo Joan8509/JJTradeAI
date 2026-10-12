@@ -31,20 +31,18 @@ class LiveStrategyPreviewTests(unittest.TestCase):
         )
         self.assertEqual(result["strategies"], [])
 
-    def test_plain_bollinger_exposure_does_not_assign_call_or_put(self) -> None:
+    def test_plain_bollinger_exposure_surfaces_probable_put_when_strong(self) -> None:
         report = {"strategies": {"evaluations": [{
             "strategy_id": "EXPUESTO_BOLLINGER_INFERIOR",
-            "name": "Expuesto Bollinger Inferior", "bias": "CALL",
+            "name": "Expuesto Bollinger Inferior", "bias": "PUT",
             "timeframe": "15m", "detected": True, "criteria": [],
         }]}}
         result = attach_strategy_preview(
             {"as_of": "2026-08-17T15:00:00+00:00"}, report
         )
         self.assertEqual(result["strategies"][0]["bias"], "ESPERAR")
-        self.assertEqual(
-            result["strategies"][0]["direction_status"],
-            "SIN DIRECCIÓN CONFIRMADA",
-        )
+        self.assertEqual(result["strategies"][0]["potential_bias"], "PUT")
+        self.assertIn("PROBABLE", result["strategies"][0]["direction_status"])
 
     def test_conflicting_methodology_directions_are_downgraded(self) -> None:
         evaluations = [

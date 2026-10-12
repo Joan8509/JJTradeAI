@@ -37,6 +37,24 @@ def _wilson_interval(wins: int, total: int, z: float = 1.96) -> tuple[float, flo
     return (max(0.0, center - margin), min(1.0, center + margin))
 
 
+def _direction_priority(score: float) -> str:
+    if score >= 80:
+        return "ALTA"
+    if score >= 60:
+        return "MEDIA"
+    if score >= 40:
+        return "BAJA"
+    return "MINIMA"
+
+
+def _direction_confidence_score(best_rate: float | None, sample_size: int, minimum_sample_size: int) -> tuple[float, str]:
+    if best_rate is None:
+        return (0.0, "MINIMA")
+    sample_factor = min(sample_size / max(minimum_sample_size, 1), 1.0)
+    score = (best_rate * 0.7) + (sample_factor * 30.0)
+    return (round(score, 2), _direction_priority(score))
+
+
 def summarize_strategy_performance(
     records: Iterable[Mapping[str, Any]],
     policy: LearningPolicy = LearningPolicy(),
@@ -316,6 +334,119 @@ def build_learning_advisory(
         "policy_version": "LEARNING_ADVISORY_V2",
         "authority": "DESCRIPTIVA_NO_INFLUYE_DECISION",
         "disclaimer": "Evidencia histórica; no modifica estrategias, compuertas ni CALL/PUT.",
+    }
+
+
+def build_directional_learning_signal(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    strategy_ids: Iterable[str],
+    context: Mapping[str, Any],
+    current_direction: str,
+    as_of: datetime,
+    methodology_version: str,
+    mode: str = "PAPER",
+    minimum_sample_size: int = 10,
+) -> dict[str, Any]:
+    """Compara CALL/PUT históricos para una alerta ya confirmada.
+
+    Esta señal solo comunica evidencia posterior y nunca sustituye las
+    compuertas metodológicas ni convierte una muestra pequeña en certeza.
+    """
+    if as_of.tzinfo is None:
+        raise ValueError("as_of debe incluir zona horaria.")
+    if minimum_sample_size <= 0:
+        raise ValueError("El tamaño mínimo debe ser mayor que cero.")
+    normalized_direction = current_direction.strip().upper()
+    if normalized_direction not in {"CALL", "PUT"}:
+        return {
+            "status": "NO_DIRECCIONAL", "recommended_direction": None,
+            "current_direction": normalized_direction, "rows": [],
+            "authority": "DESCRIPTIVA_NO_INFLUYE_DECISION",
+        }
+    normalized_mode = mode.strip().upper()
+    normalized_methodology = methodology_version.strip()
+    requested = {str(item) for item in strategy_ids}
+    eligible: list[Mapping[str, Any]] = []
+    for record in records:
+        if (
+            not record.get("trade_taken")
+            or str(record.get("mode", "")).upper() != normalized_mode
+            or str(record.get("methodology_version", "")).strip() != normalized_methodology
+            or not requested.intersection(str(item) for item in record.get("strategies", []))
+            or str(record.get("decision", "")).upper() not in {"CALL", "PUT"}
+            or str(record.get("result", "")).upper() not in {"POSITIVO", "NEGATIVO"}
+        ):
+            continue
+        try:
+            known_at = datetime.fromisoformat(str(record.get("created_at", "")).replace("Z", "+00:00"))
+            occurred_at = datetime.fromisoformat(str(record.get("event_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if known_at.tzinfo is not None and occurred_at.tzinfo is not None and occurred_at <= known_at <= as_of:
+            eligible.append(record)
+
+    dimensions = ("trend_15m", "relative_volatility_15m", "session_segment", "benchmark_regime", "benchmark_alignment")
+    contextual = [
+        item for item in eligible
+        if all(
+            str(item.get("context", {}).get(dimension, "NO_DISPONIBLE")) == str(context.get(dimension))
+            for dimension in dimensions
+            if str(context.get(dimension, "NO_DISPONIBLE")) != "NO_DISPONIBLE"
+        )
+    ]
+    source = contextual if len(contextual) >= minimum_sample_size else eligible
+    rows: list[dict[str, Any]] = []
+    for strategy in sorted(requested):
+        items = [item for item in source if strategy in {str(value) for value in item.get("strategies", [])}]
+        direction_rows: dict[str, dict[str, Any]] = {}
+        for direction in ("CALL", "PUT"):
+            direction_items = [item for item in items if str(item.get("decision", "")).upper() == direction]
+            wins = sum(str(item.get("result", "")).upper() == "POSITIVO" for item in direction_items)
+            low, high = _wilson_interval(wins, len(direction_items))
+            direction_rows[direction] = {
+                "direction": direction, "sample_size": len(direction_items),
+                "positive_count": wins,
+                "positive_rate": round(wins / len(direction_items) * 100, 2) if direction_items else None,
+                "interval_95_low": round(low * 100, 2),
+                "interval_95_high": round(high * 100, 2),
+            }
+        ranked = sorted(direction_rows.values(), key=lambda row: (row["interval_95_low"], row["positive_rate"] or 0), reverse=True)
+        best = ranked[0]
+        calibrated = best["sample_size"] >= minimum_sample_size and best["interval_95_low"] >= 50.0
+        confidence_score, priority = _direction_confidence_score(best["interval_95_low"], best["sample_size"], minimum_sample_size)
+        rows.append({
+            "strategy_id": strategy, "source": "CONTEXTO" if source is contextual else "GENERAL",
+            "current_direction": normalized_direction, "historical_direction": best["direction"] if calibrated else None,
+            "calibrated": calibrated, "sample_size": best["sample_size"],
+            "positive_rate": best["positive_rate"], "interval_95_low": best["interval_95_low"],
+            "confidence_score": confidence_score, "priority": priority,
+            "call": direction_rows["CALL"], "put": direction_rows["PUT"],
+        })
+    calibrated_rows = [row for row in rows if row["calibrated"]]
+    directions = {row["historical_direction"] for row in calibrated_rows}
+    if not calibrated_rows:
+        status = "MUESTRA_INSUFICIENTE"
+        recommendation = None
+        summary_score = 0.0
+        summary_priority = "MINIMA"
+    elif len(directions) > 1:
+        status = "HISTORIAL_CONFLICTIVO"
+        recommendation = None
+        summary_score = round(sum(row["confidence_score"] for row in calibrated_rows) / len(calibrated_rows), 2)
+        summary_priority = _direction_priority(summary_score)
+    else:
+        recommendation = next(iter(directions))
+        status = "APRENDIZAJE_ALINEADO" if recommendation == normalized_direction else "APRENDIZAJE_CONTRARIO"
+        summary_score = round(sum(row["confidence_score"] for row in calibrated_rows) / len(calibrated_rows), 2)
+        summary_priority = _direction_priority(summary_score)
+    return {
+        "status": status, "recommended_direction": recommendation,
+        "current_direction": normalized_direction, "minimum_sample_size": minimum_sample_size,
+        "known_outcome_count": len(source), "summary_score": summary_score,
+        "priority": summary_priority, "rows": rows,
+        "authority": "DESCRIPTIVA_NO_INFLUYE_DECISION",
+        "disclaimer": "Patrón histórico de resultados confirmados; no sustituye compuertas ni garantiza el próximo movimiento.",
     }
 
 

@@ -1,6 +1,13 @@
 [browser]
 gatherUsageStats = false
 
+[theme]
+base = "dark"
+primaryColor = "#4f83ff"
+backgroundColor = "#08111f"
+secondaryBackgroundColor = "#101d30"
+textColor = "#e8eef7"
+
 [server]
 headless = true
 enableStaticServing = true

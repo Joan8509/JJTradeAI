@@ -39,3 +39,14 @@ exports/paper_rehearsal*.json
 exports/paper_session_evidence*.json
 exports/methodology_coverage*.json
 exports/visual_evidence/
+exports/strategy_research/
+exports/telegram/
+exports/bollinger_study/
+web_vercel/.vercel/
+web_vercel/.env*
+!web_vercel/.env.example
+deployment/.env
+exports/web_review/
+
+# Local recovery copies
+backups/

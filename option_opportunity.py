@@ -189,4 +189,5 @@ def _candidate_payload(candidate: OptionCandidate) -> dict[str, Any]:
         "delta_approved": candidate.delta_approved,
         "eligible": candidate.eligible,
         "feed": snapshot.feed,
+        "quote_timestamp": snapshot.quote_timestamp.isoformat() if snapshot.quote_timestamp else None,
     }

@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JJTrade · Bollinger</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main>
+<header><div><span class="eyebrow">JJTRADE AI</span><h1>Bollinger con volatilidad</h1><p>Salidas en 15 minutos · observación y resultados</p></div><button id="logout" hidden>Salir</button></header>
+<section id="login" class="panel"><h2>Accede a tu radar</h2><form id="login-form"><label for="password">Contraseña privada</label><input id="password" type="password" autocomplete="current-password" required minlength="16"><button>Entrar</button></form></section>
+<p id="notice" role="status">Comprobando conexión…</p>
+<div id="dashboard" hidden>
+<section class="metrics"><article><span>Sesión regular</span><strong id="market">—</strong></article><article><span>Radar</span><strong id="radar">—</strong></article><article><span>Datos recientes</span><strong id="coverage">—</strong></article></section>
+<section><h2>Qué está ocurriendo ahora</h2><p>La vela comienza dentro de Bollinger y sale con apertura de ambas bandas. Se excluyen aperturas ya expuestas. El movimiento puede revertirse.</p><div id="signals"></div></section>
+<section class="panel"><h2>Efectividad de los movimientos</h2><div class="filters"><label>Origen <select id="origin"><option value="EN_VIVO">Detecciones en vivo</option><option value="RECONSTRUIDA">Reconstrucción histórica</option></select></label><label>Minutos después <select id="horizon"><option>5</option><option selected>15</option><option>30</option><option>60</option></select></label></div><p id="study-time"></p><div class="table-scroll"><table><thead><tr><th>Compañía</th><th>Salida</th><th>Casos</th><th>A favor</th><th>En contra</th><th>% a favor</th><th>Evidencia</th></tr></thead><tbody id="results"></tbody></table></div><p>Se excluyen ventanas solapadas. Positivo significa movimiento del subyacente a favor, no ganancia de una opción. Datos incompletos y recorridos pendientes no cuentan como aciertos.</p></section>
+<section class="panel"><h2>Últimas detecciones · historial</h2><div id="history"></div></section>
+<footer><span id="updated"></span><p>Esta pantalla consulta un radar remoto. No ejecuta órdenes. Publicarla no sustituye el servidor que recibe mercado y envía Telegram.</p></footer>
+</div></main></body></html>

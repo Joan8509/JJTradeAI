@@ -1,0 +1,108 @@
+{
+  "symbol": "TSLA",
+  "notification_sent_at_et": "10:34:09",
+  "feed": "ALPACA/iex",
+  "partial_candles": [
+    {
+      "minute_et": "10:32",
+      "close": 380.025,
+      "lower": 379.7616874449245,
+      "upper": 385.36481255507556,
+      "exposure_below_dollars": -0.263313,
+      "exposure_pct_price": -0.069288,
+      "exposure_pct_bandwidth": -4.699387,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:33",
+      "close": 379.625,
+      "lower": 379.6648350281794,
+      "upper": 385.4216649718207,
+      "exposure_below_dollars": 0.039835,
+      "exposure_pct_price": 0.010493,
+      "exposure_pct_bandwidth": 0.691961,
+      "new_rule_signal": {
+        "side": "INFERIOR",
+        "price": 379.625,
+        "candle": "2026-10-12T14:30:00+00:00"
+      },
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:34",
+      "close": 379.76,
+      "lower": 379.6984828599496,
+      "upper": 385.40151714005043,
+      "exposure_below_dollars": -0.061517,
+      "exposure_pct_price": -0.016199,
+      "exposure_pct_bandwidth": -1.078674,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:35",
+      "close": 380.15,
+      "lower": 379.7901459383516,
+      "upper": 385.3488540616484,
+      "exposure_below_dollars": -0.359854,
+      "exposure_pct_price": -0.094661,
+      "exposure_pct_bandwidth": -6.4737,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:36",
+      "close": 380.06,
+      "lower": 379.76974509212465,
+      "upper": 385.36025490787534,
+      "exposure_below_dollars": -0.290255,
+      "exposure_pct_price": -0.076371,
+      "exposure_pct_bandwidth": -5.191922,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:37",
+      "close": 380.33,
+      "lower": 379.82954365258354,
+      "upper": 385.3274563474165,
+      "exposure_below_dollars": -0.500456,
+      "exposure_pct_price": -0.131585,
+      "exposure_pct_bandwidth": -9.102661,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:38",
+      "close": 380.49,
+      "lower": 379.8629506613609,
+      "upper": 385.3100493386391,
+      "exposure_below_dollars": -0.627049,
+      "exposure_pct_price": -0.1648,
+      "exposure_pct_bandwidth": -11.511621,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    },
+    {
+      "minute_et": "10:39",
+      "close": 380.59,
+      "lower": 379.88303899788065,
+      "upper": 385.29996100211935,
+      "exposure_below_dollars": -0.706961,
+      "exposure_pct_price": -0.185754,
+      "exposure_pct_bandwidth": -13.050973,
+      "new_rule_signal": null,
+      "previous_lower": 380.150753684918,
+      "previous_upper": 385.37474631508195
+    }
+  ],
+  "note": "Minute bars cannot identify execution price or intra-minute path."
+}

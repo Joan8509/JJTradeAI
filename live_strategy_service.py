@@ -40,7 +40,7 @@ from validation_runner import run_validation_bundle_assessment
 from data_providers import DataBundle
 from governance import GovernanceLimits, GovernanceRequest, OperationWorkflow, TradingMode, evaluate_governance
 from learning_context import build_learning_context, context_from_report
-from learning_engine import build_learning_advisory
+from learning_engine import build_directional_learning_signal, build_learning_advisory
 from live_preflight import record_live_preflight, run_live_preflight
 from market_reconciliation import MarketDataReconciler, MarketReconciliationRepository
 from alert_event import classify_alert_event, classify_alert_transition
@@ -53,6 +53,7 @@ from safe_diagnostics import sanitize_diagnostic_detail
 from setup_timing import evaluate_setup_timing
 from paper_signal_evaluator import (
     build_paper_signal_advisory,
+    build_paper_directional_learning_signal,
     evaluate_available_signals,
 )
 from watchlist_config import DEFAULT_BENCHMARKS_TEXT, DEFAULT_SYMBOLS_TEXT
@@ -587,7 +588,12 @@ class AlertRepository:
                 "created_at": row["created_at"],
                 "event_at": row["trigger_timestamp"],
                 "methodology_version": str(report.get("methodology_version") or "SIN_VERSION"),
-                "strategies": [str(item.get("strategy_id")) for item in evaluations if item.get("detected") is True],
+                "strategies": [
+                    str(item.get("strategy_id"))
+                    for item in evaluations
+                    if item.get("detected") is True
+                    and item.get("required_criteria_satisfied") is True
+                ],
                 "visual_evidence_status": context["visual_confirmation"],
                 "context": context,
             })
@@ -829,6 +835,12 @@ class ContinuousStrategyScanner:
             str(item.get("strategy_id")) for item in evaluations
             if isinstance(item, Mapping) and item.get("detected") is True
         ]
+        confirmed_strategies = [
+            str(item.get("strategy_id")) for item in evaluations
+            if isinstance(item, Mapping)
+            and item.get("detected") is True
+            and item.get("required_criteria_satisfied") is True
+        ]
         report["paper_signal_advisory"] = build_paper_signal_advisory(
             self.continuity.store.database_path,
             strategy_ids=detected_strategies,
@@ -836,8 +848,26 @@ class ContinuousStrategyScanner:
             methodology_version=str(report.get("methodology_version", "")),
         )
         report["learning_advisory"] = build_learning_advisory(
-            self.alerts.alert_learning_records(), strategy_ids=detected_strategies,
+            self.alerts.alert_learning_records(), strategy_ids=confirmed_strategies,
             context=report["learning_context"], as_of=bar.timestamp,
+            methodology_version=str(report.get("methodology_version", "")),
+        )
+        evaluate_available_signals(
+            self.continuity.store.database_path,
+            horizons=(60,), symbols=(bar.symbol,),
+        )
+        report["automatic_learning_signal"] = build_paper_directional_learning_signal(
+            self.continuity.store.database_path,
+            strategy_ids=confirmed_strategies,
+            current_direction=decision,
+            as_of=bar.timestamp,
+            methodology_version=str(report.get("methodology_version", "")),
+        )
+        report["directional_learning_signal"] = build_directional_learning_signal(
+            self.alerts.alert_learning_records(), strategy_ids=confirmed_strategies,
+            context=report["learning_context"],
+            current_direction=decision,
+            as_of=bar.timestamp,
             methodology_version=str(report.get("methodology_version", "")),
         )
         report["setup_timing"] = evaluate_setup_timing(report)
@@ -881,6 +911,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Detiene cooperativamente el scanner tras esta duración.",
     )
     parser.add_argument("--database", default=str(DEFAULT_MARKET_DATABASE))
+    parser.add_argument("--data-only", action="store_true", help="Solo ingiere datos y actualiza el radar de precios; no evalúa los otros detectores.")
     parser.add_argument(
         "--benchmarks",
         default=DEFAULT_BENCHMARKS_TEXT,
@@ -1009,6 +1040,12 @@ def main() -> int:
             continuity.ingest_live_bar(bar)
             return
         try:
+            if args.data_only:
+                continuity.ingest_live_bar(bar)
+                minute_bars = store.load_frame(symbol=bar.symbol, provider="ALPACA", feed=config.feed, end=bar.timestamp)
+                preview = evaluate_live_bollinger_preview(minute_bars, symbol=bar.symbol, as_of=bar.timestamp)
+                LiveBollingerPreviewRepository(args.database).save(preview)
+                return
             result = scanner.on_bar(bar)
         except Exception as error:
             incident_id = incident_repository.record(
