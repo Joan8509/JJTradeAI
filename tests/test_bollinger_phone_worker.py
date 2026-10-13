@@ -120,7 +120,7 @@ class BollingerPhoneTests(unittest.TestCase):
                 calendar.return_value.session.return_value = session
                 store.return_value.load_frame.return_value = self.frame()
                 from unittest.mock import Mock
-                sender = Mock(return_value={"message_id": 12})
+                sender = Mock(return_value={"message_id": 12,"date":int(now.timestamp())})
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 1)
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 0)
                 sender.assert_called_once()
@@ -132,7 +132,20 @@ class BollingerPhoneTests(unittest.TestCase):
                 sender.assert_called_once()
                 with sqlite3.connect(database) as db:
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM bollinger_live_events").fetchone()[0], 2)
+                    timing=db.execute('SELECT send_started_at,telegram_message_at,state FROM bollinger_notice_timing').fetchall()
+                    self.assertEqual(timing,[(now.isoformat(),now.isoformat(),'ENVIADO')])
                 db.close()
+
+    def test_same_observed_bar_reuses_support_but_next_bar_recalculates(self):
+        from bollinger_phone_worker import _signal_support
+        _signal_support.cache_clear()
+        with patch('bollinger_phone_worker.live_context',return_value={'state':'DESCRIPTIVO'}) as support:
+            _signal_support('sample.db','AAPL','ALPACA','iex','2026-10-13T14:00:00+00:00','SUPERIOR',100.)
+            _signal_support('sample.db','AAPL','ALPACA','iex','2026-10-13T14:00:00+00:00','SUPERIOR',100.)
+            self.assertEqual(support.call_count,1)
+            _signal_support('sample.db','AAPL','ALPACA','iex','2026-10-13T14:01:00+00:00','SUPERIOR',101.)
+            self.assertEqual(support.call_count,2)
+        _signal_support.cache_clear()
 
     def test_closed_market_never_sends(self):
         with patch("bollinger_phone_worker.enabled", return_value=True), \

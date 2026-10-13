@@ -5,6 +5,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -119,8 +120,20 @@ def message_for(symbol, signal, source_time):
             f"Rango de precios: {price_range}")
 
 
+@lru_cache(maxsize=256)
+def _signal_support(database, symbol, provider, feed, stamp, side, price):
+    """Reuse descriptive support while the exact observed bar stays unchanged."""
+    signal={'side':side,'price':price}
+    try:
+        return live_context(database,symbol,provider,feed,datetime.fromisoformat(stamp),signal)
+    except (ValueError,KeyError,OSError,sqlite3.Error):
+        return {'state':'SIN_DATOS','ma_type':'SMA','provisional':False}
+
+
 def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
     now = as_of or datetime.now(timezone.utc)
+    wall_time=(lambda:now) if as_of is not None else (lambda:datetime.now(timezone.utc))
+    tick_started=time.perf_counter()
     notifications_enabled = enabled() and connection() is not None
     session = MarketSessionRepository(database).session(now.astimezone(ZoneInfo("America/New_York")).date())
     if session is None or not session.opens_at <= now < session.closes_at:
@@ -128,6 +141,8 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
     with _database(database) as db:
         db.execute("CREATE TABLE IF NOT EXISTS bollinger_phone_notifications (event_key TEXT PRIMARY KEY, state TEXT NOT NULL, attempted_at TEXT NOT NULL, message_id INTEGER, error TEXT)")
         db.execute("CREATE TABLE IF NOT EXISTS bollinger_radar_state (symbol TEXT PRIMARY KEY, source_timestamp TEXT NOT NULL, payload_json TEXT NOT NULL)")
+        db.execute("CREATE TABLE IF NOT EXISTS bollinger_notice_timing (event_key TEXT PRIMARY KEY, source_ready_at TEXT, source_received_at TEXT, detected_at TEXT, send_started_at TEXT, send_finished_at TEXT, telegram_message_at TEXT, support_ms REAL, tick_to_send_ms REAL, send_ms REAL, state TEXT)")
+        has_received=any(row[1]=='received_at' for row in db.execute('PRAGMA table_info(minute_bars)'))
         # Solamente símbolos que el buscador está vigilando y actualizando.
         previews = db.execute("SELECT symbol FROM live_bollinger_preview WHERE updated_at >= ?", ((now - timedelta(minutes=3)).isoformat(),)).fetchall()
     store = MarketBarStore(database)
@@ -143,20 +158,27 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
         if source is None:
             continue
         provider, feed, stamp = source
+        received=None
+        if has_received:
+            with _database(database) as db:
+                row=db.execute('SELECT received_at FROM minute_bars WHERE symbol=? AND provider=? AND feed=? AND timestamp=?',
+                    (symbol,provider,feed,stamp)).fetchone()
+                received=row[0] if row else None
         source_time = datetime.fromisoformat(stamp)
         bars = store.load_frame(symbol=symbol, provider=provider, feed=feed, start=now-timedelta(days=7), end=source_time)
         if bars.empty:
             continue
         observed += 1
         signal = detect_exit(prepare_market_frame(aggregate_minute_bars(bars, "15m")))
+        detected_time=wall_time()
+        support_started=time.perf_counter()
         if signal is not None:
-            try:
-                signal['ma_context'] = live_context(database, symbol, provider, feed, source_time, signal)
-            except (ValueError, KeyError, OSError, sqlite3.Error):
-                signal['ma_context'] = {'state':'SIN_DATOS','ma_type':'SMA','provisional':False}
+            signal['ma_context'] = _signal_support(str(database),symbol,provider,feed,
+                source_time.isoformat(),signal['side'],signal['price'])
         if signal is not None:
             from bollinger_pattern_memory import historical_support
             signal['historical_support'] = historical_support(symbol, provider, feed, source_time, signal)
+        support_ms=(time.perf_counter()-support_started)*1000
         state_payload = {"symbol": symbol, "provider": provider, "feed": feed,
                          "version": STRATEGY_VERSION,
                          "source_timestamp": source_time.isoformat(), "checked_at": now.isoformat(),
@@ -169,32 +191,44 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
         with _database(database) as db:
             db.execute("CREATE TABLE IF NOT EXISTS bollinger_live_events (event_key TEXT PRIMARY KEY, detected_at TEXT NOT NULL, payload_json TEXT NOT NULL)")
             event = {**signal, "symbol": symbol, "provider": provider, "feed": feed,
-                     "source_timestamp": source_time.isoformat(), "detected_at": now.isoformat(), "version": STRATEGY_VERSION,
+                     "source_timestamp": source_time.isoformat(), "detected_at": detected_time.isoformat(), "version": STRATEGY_VERSION,
                      "opening": float(aggregate_minute_bars(bars, '15m').iloc[-1]['open'])}
             event_key = f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}|{signal['candle']}|{signal['side']}"
-            db.execute("INSERT OR IGNORE INTO bollinger_live_events VALUES(?,?,?)", (event_key, now.isoformat(), json.dumps(event)))
+            db.execute("INSERT OR IGNORE INTO bollinger_live_events VALUES(?,?,?)", (event_key, detected_time.isoformat(), json.dumps(event)))
         if not notifications_enabled:
             continue
         # Una notificación por compañía, vela, disipador y chat, aun tras reiniciar.
         chat_id = connection()["chat_id"]
         key = f"v1|{chat_id}|{provider}|{feed}|{symbol}|{signal['candle']}|{signal['side']}"
+        send_started=wall_time()
+        send_clock=time.perf_counter()
+        if not timedelta(minutes=1)<=send_started-source_time<=timedelta(minutes=3):
+            continue
         with _database(database) as db:
-            claimed = db.execute("INSERT OR IGNORE INTO bollinger_phone_notifications(event_key,state,attempted_at) VALUES(?,?,?)", (key, "ENVIANDO", now.isoformat())).rowcount
+            claimed = db.execute("INSERT OR IGNORE INTO bollinger_phone_notifications(event_key,state,attempted_at) VALUES(?,?,?)", (key, "ENVIANDO", send_started.isoformat())).rowcount
         if not claimed:
             continue
+        telegram_time=None
         try:
             from manual_trade_links import signal_link
             url=signal_link(symbol,signal,source_time)
             markup={'inline_keyboard':[[{'text':'Abrir señal y operar','url':url}]]} if url else None
             result = sender(message_for(symbol, signal, source_time),reply_markup=markup) if markup else sender(message_for(symbol, signal, source_time))
             state, message_id, error = "ENVIADO", result.get("message_id"), None
+            if isinstance(result.get('date'),(int,float)):
+                telegram_time=datetime.fromtimestamp(result['date'],timezone.utc).isoformat()
             sent += 1
         except TelegramError as failure:
             # No reenvía automáticamente: un timeout puede ocurrir después de entregar.
             state, message_id, error = "ENVIO_NO_CONFIRMADO", None, str(failure)
             errors.append(error)
+        send_finished=wall_time()
         with _database(database) as db:
             db.execute("UPDATE bollinger_phone_notifications SET state=?,message_id=?,error=? WHERE event_key=?", (state, message_id, error, key))
+            db.execute("INSERT OR IGNORE INTO bollinger_notice_timing VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (key,(source_time+timedelta(minutes=1)).isoformat(),received,detected_time.isoformat(),
+                 send_started.isoformat(),send_finished.isoformat(),telegram_time,support_ms,
+                 (send_clock-tick_started)*1000,(time.perf_counter()-send_clock)*1000,state))
     return {"state": ("VIGILANDO" if notifications_enabled else "VIGILANDO_SIN_AVISOS") if observed else "SIN_DATOS_RECIENTES", "observed": observed, "sent": sent, "errors": errors}
 
 

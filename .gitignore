@@ -53,3 +53,6 @@ backups/
 
 # Large raw filter playback; verified compressed copy is retained
 exports/bollinger_playback/filters_*/report.json
+
+# Private user execution reviews
+exports/trade_review/
