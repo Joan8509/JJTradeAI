@@ -16,7 +16,7 @@ from live_market import aggregate_minute_bars
 from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore
 from market_calendar import MarketSessionRepository
 from telegram_alerts import CONFIG_PATH, TelegramError, connection, send_message
-from bollinger_ma_context import live_context, context_text
+from bollinger_ma_context import live_context
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
@@ -107,15 +107,15 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
 
 
 def message_for(symbol, signal, source_time):
-    direction = "alcista" if signal["side"] == "SUPERIOR" else "bajista"
-    local = source_time.astimezone(ZoneInfo("America/New_York"))
-    return (f"🔔 {symbol} · Bollinger 15 minutos\n"
-            f"Salida {direction} por el disipador {signal['side'].lower()}.\n"
-            f"Ambas bandas se abren y el punto medio acompaña.\n"
-            f"Precio observado: {signal['price']:.2f} · Barra: {local:%I:%M %p} ET\n"
-            f"{context_text(signal.get('ma_context'))}\n"
-            "AVISO TEMPRANO: vela en formación o recién cerrada; puede revertirse.\n"
-            "Revisa tu gráfico. No es una aprobación de entrada.")
+    from price_ranges import load_option_price_ranges
+    reference = load_option_price_ranges().get(symbol)
+    company = f"{symbol} · {reference['name']}" if reference else symbol
+    local = pd.Timestamp(signal.get('candle', source_time)).to_pydatetime().astimezone(ZoneInfo("America/New_York"))
+    price_range = f"${reference['optimal_low']:g} – ${reference['optimal_high']:g}" if reference else "Sin rango definido"
+    return (f"{company}\n"
+            f"Salida: {signal['side'].lower()}\n"
+            f"Vela: 15 min · {local:%I:%M %p} ET\n"
+            f"Rango de precios: {price_range}")
 
 
 def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):

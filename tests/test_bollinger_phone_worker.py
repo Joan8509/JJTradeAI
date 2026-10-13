@@ -84,11 +84,20 @@ class BollingerPhoneTests(unittest.TestCase):
             self.assertEqual(tick("absent.db")["state"], "FUERA_DE_SESION")
         sender.assert_not_called()
 
-    def test_message_is_observation_not_approval(self):
+    def test_message_has_only_company_side_candle_and_configured_range(self):
         signal = detect_exit(self.frame())
         text = message_for("AAPL", signal, datetime(2026, 10, 8, 14, 16, tzinfo=timezone.utc))
-        self.assertIn("superior", text)
-        self.assertIn("No es una aprobación", text)
+        lines=text.splitlines()
+        self.assertEqual(len(lines),4)
+        self.assertIn("AAPL",lines[0])
+        self.assertIn("Apple",lines[0])
+        self.assertEqual(lines[1],"Salida: superior")
+        self.assertIn("10:15 AM ET",lines[2])
+        self.assertIn("$35",lines[3])
+        self.assertIn("$90",lines[3])
+        self.assertNotIn("Medias",text)
+        signal['side']='INFERIOR'
+        self.assertIn('Salida: inferior',message_for('AAPL',signal,datetime(2026,10,8,14,16,tzinfo=timezone.utc)))
 
     def test_only_one_notice_per_candle_and_restart(self):
         now = datetime(2026, 10, 8, 14, 17, tzinfo=timezone.utc)
