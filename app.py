@@ -1357,11 +1357,11 @@ def render_bollinger_dashboard() -> None:
     market_open = session is not None and session.opens_at <= now < session.closes_at
     process_status = read_instance_status("exports/live_scanner.lock")
     configured = load_watchlist()["symbols"]
+    _render_scanner_controls(process_status)
     columns = st.columns(3)
     columns[0].metric("Estrategia", "Bollinger 15m")
     columns[1].metric("Símbolos configurados", len(configured))
     columns[2].metric("Sesión regular", "Abierta" if market_open else "Cerrada / sin calendario")
-    _render_scanner_controls(process_status)
     st.caption("Salida superior → movimiento alcista / CALL. Salida inferior → movimiento bajista / PUT. La vela debe abrir dentro de las bandas anteriores y después salir con volatilidad. Una apertura ya expuesta queda excluida.")
     states, events = [], []
     try:
@@ -4916,6 +4916,11 @@ def _render_dashboard_visuals() -> None:
     [data-testid="stTabs"] [role="tab"][aria-selected="true"] {background:#18365d;color:#a9d0ff}
     [data-testid="stMetric"] {background:rgba(14,30,50,.95);border:1px solid #29405c;
         border-radius:14px;padding:1rem}
+    [data-testid="stMetricValue"], [data-testid="stMetricValue"] > div {
+        font-size:1.25rem!important;line-height:1.35!important;white-space:normal!important;
+        overflow:visible!important;text-overflow:clip!important}
+    [data-testid="stMetricLabel"] p {font-size:.78rem!important}
+
     [data-testid="stExpander"], [data-testid="stVerticalBlockBorderWrapper"] {
         background:rgba(12,26,45,.96);border-radius:14px}
     [data-testid="stButton"] button[kind="primary"] {background:#2563eb;border-radius:10px}
