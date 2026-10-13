@@ -1262,65 +1262,73 @@ def _render_scanner_controls(process_status: Mapping[str, object]) -> None:
 def _render_price_ranges() -> None:
     """Compara la referencia de opciones con el rango dinámico de la acción."""
     option_ranges = load_option_price_ranges()
-    with st.expander("Rangos de precios actuales", expanded=False):
-        symbol = st.selectbox(
-            "Selecciona una compañía",
-            tuple(option_ranges),
-            key="price_range_symbol",
-            format_func=lambda ticker: (
-                f"{ticker} · {option_ranges[ticker]['name']}"
-            ),
+    st.subheader("Rangos de precios")
+    st.markdown("""<style>
+    .jj-range-grid {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.65rem;margin:.75rem 0}
+    .jj-range-card {background:#15243a;border:1px solid #2a405f;border-radius:10px;padding:.75rem .8rem}
+    .jj-range-card span {display:block;color:#a8b8ce;font-size:.8rem;margin-bottom:.25rem}
+    .jj-range-card b {display:block;color:#edf3fb;font-size:1rem}
+    .jj-range-card.featured {background:#18325c;border-color:#3764a7}
+    @media(max-width:700px){.jj-range-grid {grid-template-columns:1fr 1fr}}
+    </style>""", unsafe_allow_html=True)
+    symbol = st.selectbox(
+        "Selecciona una compañía",
+        tuple(option_ranges),
+        key="price_range_symbol",
+        format_func=lambda ticker: (
+            f"{ticker} · {option_ranges[ticker]['name']}"
+        ),
+    )
+    reference = option_ranges[symbol]
+    st.markdown("#### Referencia de precios de opciones")
+    st.markdown(
+        f"""<div class="jj-range-grid jj-range-reference">
+        <div class="jj-range-card featured"><span>Rango óptimo</span>
+        <b>${reference['optimal_low']:,.0f} – ${reference['optimal_high']:,.0f}</b></div>
+        <div class="jj-range-card"><span>Mínimo y máximo</span>
+        <b>${reference['minimum']:,.0f} – ${reference['maximum']:,.0f}</b></div>
+        <div class="jj-range-card"><span>Bloque</span><b>{html.escape(reference['block'])}</b></div>
+        <div class="jj-range-card"><span>Fecha del análisis</span><b>{reference['analysis_date']}</b></div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"{reference['sector']} · {reference['industry']} · "
+        f"{reference['exchange']}. Valores suministrados en el listado; "
+        "se mantienen separados del precio de la acción."
+    )
+    st.markdown("#### Rango dinámico de la acción")
+    store = MarketBarStore(AlertRepository().database_path)
+    bars = pd.DataFrame()
+    for feed in ("iex", "sip", "delayed_sip"):
+        candidate = store.load_frame(symbol=symbol, provider="ALPACA", feed=feed)
+        if not candidate.empty:
+            bars = candidate
+            break
+    summary = calculate_price_range(
+        bars,
+        current_market_date=datetime.now(ZoneInfo("America/New_York")).date(),
+    )
+    if summary is None:
+        st.info(
+            "Todavía no hay historial suficiente para calcular este rango. "
+            "Inicia el buscador para actualizar los datos."
         )
-        reference = option_ranges[symbol]
-        st.markdown("#### Referencia de precios de opciones")
-        st.markdown(
-            f"""<div class="jj-range-grid jj-range-reference">
-            <div class="jj-range-card featured"><span>Rango óptimo</span>
-            <b>${reference['optimal_low']:,.0f} – ${reference['optimal_high']:,.0f}</b></div>
-            <div class="jj-range-card"><span>Mínimo y máximo</span>
-            <b>${reference['minimum']:,.0f} – ${reference['maximum']:,.0f}</b></div>
-            <div class="jj-range-card"><span>Bloque</span><b>{html.escape(reference['block'])}</b></div>
-            <div class="jj-range-card"><span>Fecha del análisis</span><b>{reference['analysis_date']}</b></div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"{reference['sector']} · {reference['industry']} · "
-            f"{reference['exchange']}. Valores suministrados en el listado; "
-            "se mantienen separados del precio de la acción."
-        )
-        st.markdown("#### Rango dinámico de la acción")
-        store = MarketBarStore(AlertRepository().database_path)
-        bars = pd.DataFrame()
-        for feed in ("iex", "sip", "delayed_sip"):
-            candidate = store.load_frame(symbol=symbol, provider="ALPACA", feed=feed)
-            if not candidate.empty:
-                bars = candidate
-                break
-        summary = calculate_price_range(
-            bars,
-            current_market_date=datetime.now(ZoneInfo("America/New_York")).date(),
-        )
-        if summary is None:
-            st.info(
-                "Todavía no hay historial suficiente para calcular este rango. "
-                "Inicia el buscador para actualizar los datos."
-            )
-            return
-        st.markdown(
-            f"""<div class="jj-range-grid">
-            <div class="jj-range-card"><span>Precio actual</span><b>${summary['current']:,.2f}</b></div>
-            <div class="jj-range-card featured"><span>Rango estimado</span><b>${summary['expected_low']:,.2f} – ${summary['expected_high']:,.2f}</b></div>
-            <div class="jj-range-card"><span>Soporte 20 sesiones</span><b>${summary['support']:,.2f}</b></div>
-            <div class="jj-range-card"><span>Resistencia 20 sesiones</span><b>${summary['resistance']:,.2f}</b></div>
-            </div>""",
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"{summary['position']} · ATR(14): ${summary['atr']:,.2f} · "
-            f"Actualizado: {_market_event_local_time(summary['as_of'])}. "
-            "Rango estadístico informativo; no garantiza el movimiento futuro."
-        )
+        return
+    st.markdown(
+        f"""<div class="jj-range-grid">
+        <div class="jj-range-card"><span>Precio actual</span><b>${summary['current']:,.2f}</b></div>
+        <div class="jj-range-card featured"><span>Rango estimado</span><b>${summary['expected_low']:,.2f} – ${summary['expected_high']:,.2f}</b></div>
+        <div class="jj-range-card"><span>Soporte 20 sesiones</span><b>${summary['support']:,.2f}</b></div>
+        <div class="jj-range-card"><span>Resistencia 20 sesiones</span><b>${summary['resistance']:,.2f}</b></div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"{summary['position']} · ATR(14): ${summary['atr']:,.2f} · "
+        f"Actualizado: {_market_event_local_time(summary['as_of'])}. "
+        "Rango estadístico informativo; no garantiza el movimiento futuro."
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -1584,7 +1592,6 @@ def render_operational_dashboard() -> None:
     if not scanner_active:
         st.error("Inicia el scanner con el control que aparece debajo.")
     _render_scanner_controls(process_status)
-    _render_price_ranges()
     stored_previews = LiveBollingerPreviewRepository(
         AlertRepository().database_path
     ).current()
@@ -4928,11 +4935,13 @@ def main() -> None:
         st.session_state["governance_watchlist"] = ()
     if "governance_workflow" not in st.session_state:
         st.session_state["governance_workflow"] = None
-    simple_tab, phone_tab = st.tabs(["Saliendo de Bollinger con Volatilidad en 15min", "Notificaciones"])
+    simple_tab, phone_tab, ranges_tab = st.tabs(["Saliendo de Bollinger con Volatilidad en 15min", "Notificaciones", "Rangos de precios"])
     with simple_tab:
         render_bollinger_dashboard()
     with phone_tab:
         render_telegram_connection()
+    with ranges_tab:
+        _render_price_ranges()
 
 
 
