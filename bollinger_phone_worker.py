@@ -94,6 +94,9 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
     open_lower = previous_lower if opening_lower is None else opening_lower
     if not all(math.isfinite(float(v)) for v in (open_upper, open_lower)) or not open_lower <= opening <= open_upper:
         return None
+    # Condición obligatoria de volatilidad: ambos disipadores deben abrirse
+    # frente a la vela anterior. Una salida del precio o más ancho por una
+    # sola banda no basta y ningún apoyo histórico puede saltarse esta regla.
     if not (upper > previous_upper and lower < previous_lower):
         return None
     if close > upper and close > opening and mid > previous_mid:

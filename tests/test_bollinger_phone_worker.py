@@ -55,9 +55,12 @@ class BollingerPhoneTests(unittest.TestCase):
                           opening=96, opening_upper=103, opening_lower=97))
 
     def test_exposure_without_both_bands_opening_is_not_this_strategy(self):
-        frame = self.frame()
-        frame.loc[1, "bollinger_lower"] = 99
-        self.assertIsNone(detect_exit(frame))
+        for side in ('SUPERIOR','INFERIOR'):
+            for upper,lower in ((103,98),(102,97),(103,99),(101,97),(102,98)):
+                frame = self.frame(side)
+                frame.loc[1, "bollinger_upper"] = upper
+                frame.loc[1, "bollinger_lower"] = lower
+                self.assertIsNone(detect_exit(frame),(side,upper,lower))
 
     def test_previously_exposed_price_is_not_new_exit(self):
         frame = self.frame()
