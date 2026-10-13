@@ -4974,13 +4974,13 @@ def main() -> None:
         st.session_state["governance_watchlist"] = ()
     if "governance_workflow" not in st.session_state:
         st.session_state["governance_workflow"] = None
-    simple_tab, phone_tab, ranges_tab = st.tabs(["Saliendo de Bollinger con Volatilidad en 15min", "Notificaciones", "Rangos de precios"])
+    simple_tab, ranges_tab, phone_tab = st.tabs(["Saliendo de Bollinger-15min", "Rangos de precio", "Notificaciones"])
     with simple_tab:
         render_bollinger_dashboard()
-    with phone_tab:
-        render_telegram_connection()
     with ranges_tab:
         _render_price_ranges()
+    with phone_tab:
+        render_telegram_connection()
 
 
 
