@@ -6,6 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MEMORY_PATH = Path(__file__).resolve().parent / 'exports/bollinger_playback/pattern_memory.json'
+RETRACEMENT_PATH = MEMORY_PATH.parent/'retracement_memory.json'
 
 
 def profile(stamp, exposure):
@@ -53,6 +54,26 @@ def historical_support(symbol, provider, feed, source_time, signal):
         memory = _read(str(MEMORY_PATH), MEMORY_PATH.stat().st_mtime_ns)
         if memory.get('version') != 'v3_bandas_en_apertura':
             return {'state': 'VERSION_MISMATCH'}
-        return assess(memory['records'], symbol, provider, feed, source_time, signal)
+        result=assess(memory['records'], symbol, provider, feed, source_time, signal)
+        result['retracement_support']=retracement_support(symbol,source_time,signal,provider=provider,feed=feed)
+        return result
     except (OSError, ValueError, KeyError, TypeError):
         return {'state': 'UNAVAILABLE'}
+
+
+def retracement_support(symbol, source_time, signal, *, provider='ALPACA',feed='iex'):
+    try:
+        memory=_read(str(RETRACEMENT_PATH),RETRACEMENT_PATH.stat().st_mtime_ns)
+        if memory['version']!='v3_bandas_en_apertura':return {'state':'VERSION_MISMATCH'}
+        if datetime.fromisoformat(memory['as_of'])>source_time+timedelta(minutes=1):
+            return {'state':'NOT_AVAILABLE_AT_SIGNAL_TIME'}
+        exposure=signal.get('exposure_pct_bandwidth')
+        if exposure is None:return {'state':'INSUFFICIENT'}
+        group='SMALL_LT1' if exposure<1 else 'MID_1_TO3' if exposure<3 else 'LARGE_GE3'
+        profile=next((p for p in memory['profiles'] if (p['symbol'],p['provider'].upper(),p['feed'].lower(),p['side'],p['exposure_group'])==(symbol,provider.upper(),feed.lower(),signal['side'],group)),None)
+        if not profile or profile['sample']<20 or profile['sessions']<5:
+            return {'state':'INSUFFICIENT','sample':profile['sample'] if profile else 0}
+        return {'state':'DESCRIPTIVE','as_of':memory['as_of'],'basis':memory['basis'],
+                'authority':memory['authority'],**profile}
+    except (OSError,ValueError,KeyError,TypeError):
+        return {'state':'UNAVAILABLE'}
