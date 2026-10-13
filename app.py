@@ -1189,11 +1189,11 @@ def _render_scanner_controls(process_status: Mapping[str, object]) -> None:
         if pending_symbols:
             st.warning("Agregados a la lista, pendientes de reiniciar el buscador: " + ", ".join(pending_symbols))
             st.caption("Todavía no reciben datos ni avisos. Para aplicarlos, detén el buscador y vuelve a iniciarlo con la lista guardada y tus credenciales de Alpaca.")
-        existing_text = st.session_state.get("control_scanner_symbols")
-        if not scanner_active and existing_text and set(existing_text.split(",")).issubset(set(configured_symbols)):
+        if not scanner_active and st.session_state.get('control_scanner_watchlist_applied') != configured_symbols:
             st.session_state["control_scanner_symbols"] = configured_text
+            st.session_state['control_scanner_watchlist_applied'] = configured_symbols
         scanner_symbols = st.text_input(
-            "Compañías a vigilar", value=configured_text,
+            "Compañías a vigilar", value=None if 'control_scanner_symbols' in st.session_state else configured_text,
             key="control_scanner_symbols", disabled=scanner_active,
         )
         scanner_days = st.number_input(
