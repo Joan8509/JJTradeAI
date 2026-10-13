@@ -22,11 +22,11 @@ def _read(path, modified):
     return json.loads(Path(path).read_text(encoding='utf-8'))
 
 
-def assess(records, symbol, provider, feed, source_time, signal):
+def assess(records, symbol, provider, feed, source_time, signal, *, available_at=None):
     """Only outcomes already available at signal time; no future analogs."""
     stamp = source_time.isoformat()
     key = profile(stamp, signal.get('exposure_pct_bandwidth'))
-    available = source_time + timedelta(minutes=1)
+    available = available_at if available_at is not None else source_time + timedelta(minutes=1)
     matches = []
     end = None
     for row in sorted(records, key=lambda r: r['start']):
@@ -49,23 +49,24 @@ def assess(records, symbol, provider, feed, source_time, signal):
             'limitations': 'Same company, direction, source, session phase and exposure; not a calibrated probability. SMA and barriers are not matched by this index.'}
 
 
-def historical_support(symbol, provider, feed, source_time, signal):
+def historical_support(symbol, provider, feed, source_time, signal, *, available_at=None):
     try:
         memory = _read(str(MEMORY_PATH), MEMORY_PATH.stat().st_mtime_ns)
         if memory.get('version') != 'v3_bandas_en_apertura':
             return {'state': 'VERSION_MISMATCH'}
-        result=assess(memory['records'], symbol, provider, feed, source_time, signal)
-        result['retracement_support']=retracement_support(symbol,source_time,signal,provider=provider,feed=feed)
+        result=assess(memory['records'], symbol, provider, feed, source_time, signal, available_at=available_at)
+        result['retracement_support']=retracement_support(symbol,source_time,signal,provider=provider,feed=feed,available_at=available_at)
         return result
     except (OSError, ValueError, KeyError, TypeError):
         return {'state': 'UNAVAILABLE'}
 
 
-def retracement_support(symbol, source_time, signal, *, provider='ALPACA',feed='iex'):
+def retracement_support(symbol, source_time, signal, *, provider='ALPACA',feed='iex',available_at=None):
     try:
         memory=_read(str(RETRACEMENT_PATH),RETRACEMENT_PATH.stat().st_mtime_ns)
         if memory['version']!='v3_bandas_en_apertura':return {'state':'VERSION_MISMATCH'}
-        if datetime.fromisoformat(memory['as_of'])>source_time+timedelta(minutes=1):
+        available = available_at if available_at is not None else source_time+timedelta(minutes=1)
+        if datetime.fromisoformat(memory['as_of'])>available:
             return {'state':'NOT_AVAILABLE_AT_SIGNAL_TIME'}
         exposure=signal.get('exposure_pct_bandwidth')
         if exposure is None:return {'state':'INSUFFICIENT'}

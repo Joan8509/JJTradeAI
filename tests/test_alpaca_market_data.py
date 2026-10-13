@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 import os
+import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +12,7 @@ import pandas as pd
 from alpaca_market_data import (
     AlpacaMarketConfig,
     AlpacaMarketDataProvider,
+    AlpacaStockBarStream,
     alpaca_messages_to_bars,
     build_alpaca_data_bundle,
 )
@@ -21,6 +24,35 @@ END = datetime(2026, 7, 20, 20, 0, tzinfo=timezone.utc)
 
 
 class AlpacaMarketDataTests(unittest.TestCase):
+    def test_one_socket_subscribes_bars_and_trades_and_handles_corrections(self):
+        sockets,subscriptions,trades,bars,statuses=[],[],[],[],[]
+        class Socket:
+            def __init__(self,url,**callbacks):
+                self.callbacks=callbacks
+                sockets.append(self)
+            def send(self,data):
+                subscriptions.append(json.loads(data))
+            def run_forever(self,**kwargs):
+                self.callbacks['on_open'](self)
+                self.callbacks['on_message'](self,json.dumps([{'T':'success','msg':'authenticated'}]))
+                self.assert_not_connected_yet=not statuses
+                self.callbacks['on_message'](self,json.dumps([{'T':'subscription','trades':['AAPL'],'bars':['AAPL']}]))
+                self.callbacks['on_message'](self,json.dumps([
+                    {'T':'t','S':'AAPL','p':100,'s':100,'c':['@'],'z':'C','i':1,'t':START.isoformat()},
+                    {'T':'c','S':'AAPL','oi':1,'cp':99}, {'T':'x','S':'AAPL','i':1},
+                    {'T':'b','S':'AAPL','t':START.isoformat(),'o':99,'h':100,'l':99,'c':100,'v':100}]))
+            def close(self):
+                pass
+        with patch.dict('sys.modules',{'websocket':SimpleNamespace(WebSocketApp=Socket)}):
+            AlpacaStockBarStream(AlpacaMarketConfig('key','secret'),on_trade_message=trades.append).run(
+                ['AAPL'],bars.append,on_status=statuses.append)
+        self.assertEqual(len(sockets),1)
+        self.assertTrue(sockets[0].assert_not_connected_yet)
+        self.assertEqual(subscriptions[1],{'action':'subscribe','bars':['AAPL'],'updatedBars':['AAPL'],'trades':['AAPL']})
+        self.assertEqual([message['T'] for message in trades],['t','c','x'])
+        self.assertEqual(len(bars),1)
+        self.assertEqual(statuses,['CONECTADO'])
+
     def test_config_requires_credentials(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "ALPACA_API_KEY"):

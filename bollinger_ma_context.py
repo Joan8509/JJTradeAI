@@ -124,8 +124,8 @@ def _history(database,symbol,provider,feed,hour_key):
     return data
 
 
-def live_context(database, symbol, provider, feed, source_time, signal):
-    available=pd.Timestamp(source_time)+pd.Timedelta(minutes=1)
+def live_context(database, symbol, provider, feed, source_time, signal, *, available_at=None):
+    available=pd.Timestamp(available_at) if available_at is not None else pd.Timestamp(source_time)+pd.Timedelta(minutes=1)
     # Hour buckets are anchored at :30, as are the market's hourly candles.
     key=((available-pd.Timedelta(minutes=30)).floor('h')+pd.Timedelta(minutes=30)).isoformat()
     data=_history(str(database),symbol,provider,feed,key)

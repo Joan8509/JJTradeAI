@@ -30,7 +30,7 @@ from live_bollinger_preview import (
     attach_strategy_preview,
     evaluate_live_bollinger_preview,
 )
-from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore, MarketContinuityService
+from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore, MarketContinuityService, LiveBarIngestion
 from market_calendar import AlpacaMarketCalendarProvider, MarketSessionRepository, session_close_map
 from market_context import build_market_context
 from option_market_data import AlpacaOptionDataProvider
@@ -716,14 +716,30 @@ class ContinuousStrategyScanner:
         self.reconciler = reconciler
         self.reconciliation_repository = reconciliation_repository
 
-    def on_bar(self, bar: MarketBar) -> dict[str, Any] | None:
-        ingestion = self.continuity.ingest_live_bar(bar)
+    def on_bar(self, bar: MarketBar, *, already_persisted=False) -> dict[str, Any] | None:
+        if already_persisted:
+            if not bar.complete:
+                raise ValueError('No se analizan barras todavía abiertas.')
+            ingestion=LiveBarIngestion(bar.symbol,bar.timestamp,
+                closes_timeframe(bar.timestamp,'15m'),closes_timeframe(bar.timestamp,'1H'))
+        else:
+            ingestion = self.continuity.ingest_live_bar(bar)
         minute_bars = self.continuity.store.load_frame(
             symbol=bar.symbol,
             provider=self.continuity.provider_name,
             feed=self.feed,
             end=bar.timestamp,
         )
+        if already_persisted:
+            # A queued original bar may have received an official update while
+            # analysis was busy. Read that canonical revision; never overwrite
+            # it by ingesting the old queued bar again.
+            exact=minute_bars[minute_bars.date==pd.Timestamp(bar.timestamp)]
+            if exact.empty:
+                raise ValueError('Falta la barra persistida para analizar.')
+            row=exact.iloc[-1]
+            bar=MarketBar(bar.symbol,bar.timestamp,float(row.open),float(row.high),
+                          float(row.low),float(row.close),float(row.volume))
         preview = evaluate_live_bollinger_preview(
             minute_bars, symbol=bar.symbol, as_of=bar.timestamp
         )
@@ -1043,12 +1059,13 @@ def main() -> int:
             return
         try:
             if args.data_only:
-                continuity.ingest_live_bar(bar)
+                if realtime_worker is None:
+                    continuity.ingest_live_bar(bar)
                 minute_bars = store.load_frame(symbol=bar.symbol, provider="ALPACA", feed=config.feed, end=bar.timestamp)
                 preview = evaluate_live_bollinger_preview(minute_bars, symbol=bar.symbol, as_of=bar.timestamp)
                 LiveBollingerPreviewRepository(args.database).save(preview)
                 return
-            result = scanner.on_bar(bar)
+            result = scanner.on_bar(bar,already_persisted=realtime_worker is not None)
         except Exception as error:
             incident_id = incident_repository.record(
                 symbol=bar.symbol,
@@ -1106,10 +1123,14 @@ def main() -> int:
                     f"{sanitize_diagnostic_detail(error)}"
                 )
 
+    use_polling = args.transport == 'polling' or (args.transport == 'auto' and len(stream_symbols) > 30)
+    realtime_worker = None
+    if not use_polling:
+        from bollinger_tick_stream import RealtimeBollingerWorker, RealtimeBollingerStream
+        realtime_worker = RealtimeBollingerWorker(args.database, config.feed, stream_symbols)
     supervisor = ResilientStreamSupervisor(
         stream_factory=lambda: AlpacaPollingBarStream(config, continuity=continuity)
-        if args.transport == 'polling' or (args.transport == 'auto' and len(stream_symbols) > 30)
-        else AlpacaStockBarStream(config),
+        if use_polling else RealtimeBollingerStream(config, realtime_worker),
         continuity=continuity,
         health=ServiceHealthRepository(args.database),
     )
@@ -1142,6 +1163,8 @@ def main() -> int:
         supervisor.stop()
     finally:
         monitor_finished.set()
+        if realtime_worker is not None:
+            realtime_worker.close()
         Path(args.stop_file).unlink(missing_ok=True)
         lease.release()
     return 0

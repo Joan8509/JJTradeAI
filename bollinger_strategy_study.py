@@ -67,7 +67,13 @@ def evaluate_event(event, indexed, session_close, *, as_of, horizon):
     source = pd.Timestamp(event["source_timestamp"])
     available = pd.Timestamp(event["detected_at"])
     # La observación en vivo puede haberse recibido tarde: no usa precios ya pasados como salida.
-    start = max(source + pd.Timedelta(minutes=1), available.floor("min") + pd.Timedelta(minutes=1)) if event.get("origin") == "EN_VIVO" else source + pd.Timedelta(minutes=1)
+    if event.get('source_kind')=='TRADE':
+        # Exact trade timestamps have seconds. The first full minute after
+        # detection is observable; adding one minute to the tick would create
+        # non-minute timestamps and make every result appear incomplete.
+        start=max(source,available).floor('min')+pd.Timedelta(minutes=1)
+    else:
+        start = max(source + pd.Timedelta(minutes=1), available.floor("min") + pd.Timedelta(minutes=1)) if event.get("origin") == "EN_VIVO" else source + pd.Timedelta(minutes=1)
     end = start + pd.Timedelta(minutes=horizon-1)
     result = {**event, "horizon": horizon, "start": start.isoformat(), "end": end.isoformat()}
     if session_close is None or end + pd.Timedelta(minutes=1) > session_close:
@@ -142,7 +148,8 @@ def build_report(database=DEFAULT_MARKET_DATABASE, *, as_of=None, days=30):
         event_count += len(events)
         for event in events:
             date = pd.Timestamp(event["source_timestamp"]).tz_convert("America/New_York").date().isoformat()
-            if sessions.get(date) is not None and pd.Timestamp(event["source_timestamp"]) + pd.Timedelta(minutes=1) > sessions[date]:
+            source_available=pd.Timestamp(event['source_timestamp'])+(pd.Timedelta(0) if event.get('source_kind')=='TRADE' else pd.Timedelta(minutes=1))
+            if sessions.get(date) is not None and source_available > sessions[date]:
                 event_count -= 1
                 continue
             for horizon in HORIZONS:

@@ -231,9 +231,10 @@ def alpaca_messages_to_bars(messages: Iterable[dict[str, Any]]) -> tuple[MarketB
 class AlpacaStockBarStream:
     """Cliente WebSocket mínimo para barras cerradas de un minuto."""
 
-    def __init__(self, config: AlpacaMarketConfig) -> None:
+    def __init__(self, config: AlpacaMarketConfig, *, on_trade_message=None) -> None:
         self.config = config
         self._socket: Any = None
+        self.on_trade_message = on_trade_message
 
     def run(
         self,
@@ -272,19 +273,42 @@ class AlpacaStockBarStream:
                 item.get("T") == "success" and item.get("msg") == "authenticated"
                 for item in messages
             ):
-                send(
-                    socket,
-                    {
+                subscription = {
                         "action": "subscribe",
                         "bars": normalized_symbols,
                         "updatedBars": normalized_symbols,
-                    },
-                )
+                    }
+                if self.on_trade_message is not None:
+                    subscription["trades"] = normalized_symbols
+                send(socket, subscription)
                 subscribed = True
-                if on_status:
+                if on_status and self.on_trade_message is None:
                     on_status("CONECTADO")
+            for item in messages:
+                if item.get("T") == "subscription" and self.on_trade_message is not None:
+                    if set(normalized_symbols).issubset(item.get('trades', [])) and on_status:
+                        on_status("CONECTADO")
+                if item.get("T") == "error":
+                    if on_error:
+                        on_error(RuntimeError(f"Alpaca stream error {item.get('code')}: {item.get('msg')}"))
+                    socket.close()
+                    return
+                if self.on_trade_message is not None and item.get("T") in ("t", "c", "x"):
+                    try:
+                        self.on_trade_message(item)
+                    except Exception as error:
+                        if on_error:
+                            on_error(error)
+                        socket.close()
+                        return
             for bar in alpaca_messages_to_bars(messages):
-                on_bar(bar)
+                try:
+                    on_bar(bar)
+                except Exception as error:
+                    if on_error:
+                        on_error(error)
+                    socket.close()
+                    return
 
         def handle_error(_socket: Any, error: Any) -> None:
             if on_error:

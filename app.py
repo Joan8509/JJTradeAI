@@ -1343,10 +1343,12 @@ def _dashboard_background_data_uri() -> str:
 
 def _bollinger_state_is_current(item, *, now, market_open):
     stamp = _parse_alert_time(item.get("source_timestamp"))
+    if item.get('source_kind')=='TRADE':
+        return bool(market_open and stamp is not None and timedelta(0)<=now-stamp<=timedelta(seconds=3))
     return bool(market_open and stamp is not None and timedelta(minutes=1) <= now-stamp <= timedelta(minutes=3))
 
 
-@st.fragment(run_every="15s")
+@st.fragment(run_every="3s")
 def render_bollinger_dashboard() -> None:
     from bollinger_phone_worker import STRATEGY_VERSION
     st.subheader("Salida de Bollinger con volatilidad · 15 minutos")
@@ -1425,7 +1427,8 @@ def render_bollinger_dashboard() -> None:
                     if levels:
                         st.dataframe(pd.DataFrame(levels), hide_index=True, width='stretch')
                     st.caption('Un cierre observado de Hora corresponde a la hora indicada; no confirma la salida actual de 15 minutos. Los contactos y la separación se miden, pero todavía no tienen umbrales validados para bloquear avisos.')
-            st.caption("Barra: " + _market_event_local_time(item["source_timestamp"]) + ". Revisa el gráfico: esta salida puede revertirse.")
+            label="Precio recibido: " if item.get('source_kind')=='TRADE' else "Barra: "
+            st.caption(label + _market_event_local_time(item["source_timestamp"]) + ". Revisa el gráfico: esta salida puede revertirse.")
     with st.expander("Compañías y estado del radar"):
         latest = {item["symbol"]: item for item in states}
         fresh = {item["symbol"] for item in current}

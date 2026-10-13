@@ -568,6 +568,26 @@ class LiveStrategyServiceTests(unittest.TestCase):
                 result["report"]["live_data_freshness"]["status"], "APROBADO"
             )
 
+    def test_queued_analysis_preserves_official_updated_bar(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database=Path(directory)/'market.db'
+            store=MarketBarStore(database)
+            continuity=MarketContinuityService(store,UnusedProvider(),provider_name='ALPACA',feed='iex')
+            original=MarketBar('SPY',START,100,102,99,100,100)
+            updated=MarketBar('SPY',START,100,102,99,101,120)
+            store.upsert_bar(updated,provider='ALPACA',feed='iex')
+            seen=[]
+            def preview(symbol,bundle):
+                seen.append(float(bundle.auxiliary_datasets['1m'].iloc[-1].close))
+                return report(symbol)
+            scanner=ContinuousStrategyScanner(continuity,AlertRepository(database),feed='iex',
+                evaluator=lambda symbol,bundle:report(symbol),preview_evaluator=preview)
+            scanner.on_bar(original,already_persisted=True)
+            self.assertEqual(seen,[101.])
+            saved=store.load_frame(symbol='SPY',provider='ALPACA',feed='iex')
+            self.assertEqual(float(saved.iloc[-1].close),101.)
+            self.assertEqual(float(saved.iloc[-1].volume),120.)
+
     def test_failed_rest_reconciliation_blocks_effective_freshness(self) -> None:
         class RejectedReconciler:
             def reconcile(self, symbol, *, start, end, local):

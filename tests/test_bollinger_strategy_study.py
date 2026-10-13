@@ -30,6 +30,14 @@ class BollingerStudyTests(unittest.TestCase):
         result = self.evaluate(self.event(), self.bars().iloc[1:])
         self.assertEqual(result["status"], "DATOS_INCOMPLETOS")
 
+    def test_trade_with_seconds_uses_first_full_minute_after_detection(self):
+        event={**self.event(),'origin':'EN_VIVO','source_kind':'TRADE',
+               'source_timestamp':'2026-10-08T14:00:20.123456+00:00',
+               'detected_at':'2026-10-08T14:00:21+00:00'}
+        result=self.evaluate(event,self.bars())
+        self.assertEqual(result['start'],'2026-10-08T14:01:00+00:00')
+        self.assertEqual(result['result'],'POSITIVO')
+
     def test_future_and_market_close_are_excluded(self):
         self.assertEqual(self.evaluate(self.event(), self.bars(), now="2026-10-08T14:04:00Z")["status"], "PENDIENTE")
         self.assertEqual(self.evaluate(self.event(), self.bars(), close="2026-10-08T14:05:00Z")["status"], "SIN_RECORRIDO_ANTES_DEL_CIERRE")
