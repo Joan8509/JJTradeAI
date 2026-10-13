@@ -17,6 +17,7 @@ from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore
 from market_calendar import MarketSessionRepository
 from telegram_alerts import CONFIG_PATH, TelegramError, connection, send_message
 from bollinger_ma_context import live_context
+from watchlist_config import load_watchlist
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
@@ -132,7 +133,10 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
     store = MarketBarStore(database)
     observed = sent = 0
     errors = []
+    configured=set(load_watchlist()['symbols'])
     for (symbol,) in previews:
+        if symbol not in configured:
+            continue
         with _database(database) as db:
             source = db.execute("SELECT provider,feed,MAX(timestamp) FROM minute_bars WHERE symbol=? AND timestamp>=? AND timestamp<=? GROUP BY provider,feed ORDER BY MAX(timestamp) DESC LIMIT 1",
                                 (symbol, (now - timedelta(minutes=3)).isoformat(), (now - timedelta(minutes=1)).isoformat())).fetchone()

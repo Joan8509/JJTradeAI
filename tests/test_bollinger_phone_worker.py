@@ -140,3 +140,20 @@ class BollingerPhoneTests(unittest.TestCase):
                 patch("bollinger_phone_worker.MarketSessionRepository") as calendar:
             calendar.return_value.session.return_value = None
             self.assertEqual(tick("absent.db")["state"], "FUERA_DE_SESION")
+
+    def test_removed_symbol_is_not_analyzed_even_if_old_scanner_keeps_publishing(self):
+        now=datetime(2026,10,13,14,17,tzinfo=timezone.utc)
+        session=SimpleNamespace(opens_at=now.replace(hour=13,minute=30),closes_at=now.replace(hour=20,minute=0))
+        with tempfile.TemporaryDirectory() as directory:
+            database=Path(directory)/'market.db'
+            with sqlite3.connect(database) as db:
+                db.execute('CREATE TABLE live_bollinger_preview(symbol TEXT,updated_at TEXT)')
+                db.execute("INSERT INTO live_bollinger_preview VALUES('GOOG',?)",(now.isoformat(),))
+            db.close()
+            with patch('bollinger_phone_worker.enabled',return_value=False), \
+                    patch('bollinger_phone_worker.MarketSessionRepository') as calendar, \
+                    patch('bollinger_phone_worker.detect_exit') as detector:
+                calendar.return_value.session.return_value=session
+                result=tick(database,as_of=now)
+                self.assertEqual(result['observed'],0)
+                detector.assert_not_called()

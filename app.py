@@ -1373,8 +1373,8 @@ def render_bollinger_dashboard() -> None:
                 events = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM bollinger_live_events ORDER BY detected_at DESC LIMIT 50")]
     except (sqlite3.Error, OSError, ValueError):
         st.warning("No se pudieron consultar los estados del radar. Revisa el buscador.")
-    current = [item for item in states if item.get("version") == STRATEGY_VERSION and _bollinger_state_is_current(item, now=now, market_open=market_open)]
-    events = [event for event in events if event.get("version") == STRATEGY_VERSION]
+    current = [item for item in states if item['symbol'] in configured and item.get("version") == STRATEGY_VERSION and _bollinger_state_is_current(item, now=now, market_open=market_open)]
+    events = [event for event in events if event['symbol'] in configured and event.get("version") == STRATEGY_VERSION]
     detected = [item for item in current if item.get("signal")]
     st.markdown("### Qué está ocurriendo ahora")
     if not market_open:
