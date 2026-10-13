@@ -1427,9 +1427,7 @@ def render_bollinger_dashboard() -> None:
                  "Precio observado": e["price"], "Estado": "Observación guardada · consultar resultado"}
                 for e in events]), width="stretch", hide_index=True)
         else:
-            st.caption("Todavía no hay detecciones en vivo guardadas. La reconstrucción histórica está en Seguimiento de resultados.")
-    st.markdown("### Cómo comprobamos su efectividad")
-    st.write("En Seguimiento de resultados verás si cada salida continuó a favor o terminó en contra a 5, 15, 30 y 60 minutos. Los casos pendientes y los datos incompletos se muestran separados.")
+            st.caption("Todavía no hay detecciones en vivo guardadas.")
     st.caption("La observación continúa aunque pauses Telegram. El PC, el buscador y el radar deben permanecer encendidos.")
 
 
@@ -4930,37 +4928,12 @@ def main() -> None:
         st.session_state["governance_watchlist"] = ()
     if "governance_workflow" not in st.session_state:
         st.session_state["governance_workflow"] = None
-    simple_tab, phone_tab, validation_tab, research_tab, risk_tab, governance_tab, journal_tab, analysis_tab, audit_tab = st.tabs(
-        [
-            "Bollinger en vivo",
-            "Avisos a mi teléfono",
-            "Validar entrada PAPER",
-            "Seguimiento de resultados",
-            "Riesgo de opciones",
-            "Plan operativo",
-            "Diario",
-            "Análisis",
-            "Auditoría",
-        ]
-    )
+    simple_tab, phone_tab = st.tabs(["Bollinger en vivo", "Avisos a mi teléfono"])
     with simple_tab:
         render_bollinger_dashboard()
-    with validation_tab:
-        st.info("Las validaciones de entrada quedan fuera del enfoque actual. Primero estamos comprobando la salida de Bollinger y la continuidad del movimiento. Consulta Bollinger en vivo y Seguimiento de resultados.")
     with phone_tab:
         render_telegram_connection()
-    with research_tab:
-        _render_strategy_research()
-    with risk_tab:
-        render_risk()
-    with governance_tab:
-        render_governance()
-    with analysis_tab:
-        render_analysis()
-    with journal_tab:
-        render_journal()
-    with audit_tab:
-        render_report_audit()
+
 
 
 if __name__ == "__main__":
