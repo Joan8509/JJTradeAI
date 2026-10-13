@@ -104,9 +104,12 @@ def send_test(path=CONFIG_PATH):
     return send_message("🔔 JJTrade · Prueba de conexión\nTu teléfono recibe mensajes de la app.\nEste es un mensaje de prueba, no una señal de mercado.", path)
 
 
-def send_message(text, path=CONFIG_PATH):
+def send_message(text, path=CONFIG_PATH, *, reply_markup=None):
     settings = connection(path)
     if not settings:
         raise TelegramError("Primero vincula tu chat.")
     token = os.environ["TELEGRAM_BOT_TOKEN"] if settings.get("token_source") == "ENVIRONMENT" else _protect(base64.b64decode(settings["protected_token"]), decrypt=True).decode()
-    return call(token, "sendMessage", chat_id=settings["chat_id"], text=text)
+    payload={"chat_id":settings["chat_id"],"text":text}
+    if reply_markup is not None:
+        payload['reply_markup']=reply_markup
+    return call(token, "sendMessage", **payload)

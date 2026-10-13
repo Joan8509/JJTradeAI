@@ -176,7 +176,10 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message):
         if not claimed:
             continue
         try:
-            result = sender(message_for(symbol, signal, source_time))
+            from manual_trade_links import signal_link
+            url=signal_link(symbol,signal,source_time)
+            markup={'inline_keyboard':[[{'text':'Abrir señal y operar','url':url}]]} if url else None
+            result = sender(message_for(symbol, signal, source_time),reply_markup=markup) if markup else sender(message_for(symbol, signal, source_time))
             state, message_id, error = "ENVIADO", result.get("message_id"), None
             sent += 1
         except TelegramError as failure:

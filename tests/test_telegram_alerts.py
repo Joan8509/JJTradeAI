@@ -5,10 +5,17 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
 
-from telegram_alerts import TelegramError, _protect, call, connection, discover, save_connection, send_test
+from telegram_alerts import TelegramError, _protect, call, connection, discover, save_connection, send_test, send_message
 
 
 class TelegramConnectionTests(unittest.TestCase):
+    def test_review_button_is_sent_without_broker_command_or_credentials(self):
+        markup={'inline_keyboard':[[{'text':'Abrir señal y operar','url':'https://jj.example/?operar=AAPL'}]]}
+        with patch.dict('os.environ',{'TELEGRAM_BOT_TOKEN':'123:test','TELEGRAM_CHAT_ID':'1'}), \
+                patch('telegram_alerts.call',return_value={'message_id':1}) as api:
+            send_message('AAPL',reply_markup=markup)
+        self.assertEqual(api.call_args.kwargs['reply_markup'],markup)
+
     def test_secret_is_encrypted_and_test_uses_selected_chat(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "connection.json"

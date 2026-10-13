@@ -45,3 +45,9 @@ La simulación inicial será local; no se presupone un entorno paperMoney por AP
 Fuentes:
 - https://developer.schwab.com/
 - https://international.schwab.com/story/set-up-thinkorswim-desktop-options-trading
+
+
+## Primer paso de operacion manual desde Telegram
+Implementada una pantalla movil de revision (?operar=SIMBOLO&lado=CALL|PUT&senal=FECHA), sin ejecucion de ordenes. Incluye grafico OHLC 15m y Bollinger con las barras IEX locales, marca datos antiguos, CALL/PUT y referencia del listado separada de cotizaciones. Los botones Comprar/Vender estan deshabilitados: falta conexion autorizada a Schwab, cotizaciones reales, contratos, cuenta, posiciones y conciliacion de ordenes. No hay simulacion de fills ni precios inventados.
+Telegram puede adjuntar inline_keyboard con URL a la compania cuando exista JJTRADE_APP_URL o exports/telegram/app_link.json. En Notificaciones se guarda la direccion que abre desde el telefono; rechaza localhost y credenciales en el enlace. GET solo abre revision y nunca compra. Radar reiniciado para cargar soporte del boton, deduplicacion preservada. Falta direccion del usuario para activar enlaces y saber si tiene app aprobada en el portal Schwab; se solicito sin pedir secretos por chat. No se desplego web publica ni se envio un mensaje de prueba.
+Selector ITM can?nico preparado y probado con snapshots OPRA: CALL strike menor que precio accion, PUT mayor; rechaza quote/accion antiguos (>30s), futuros, bid/ask incoherentes o sin tamano, datos indicative y expirados. Aun NO conectado a datos ni al formulario. Esta tolerancia solo comprueba antiguedad del dato, no valida rentabilidad ni calidad de ejecucion. Pendientes unidades del rango de primas, vencimiento, cantidad/presupuesto y precio limite antes de preparar ordenes reales.

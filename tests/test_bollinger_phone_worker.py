@@ -102,6 +102,7 @@ class BollingerPhoneTests(unittest.TestCase):
                     patch("bollinger_phone_worker.connection", return_value={"chat_id": "1"}), \
                     patch("bollinger_phone_worker.MarketSessionRepository") as calendar, \
                     patch("bollinger_phone_worker.MarketBarStore") as store, \
+                    patch("manual_trade_links.signal_link", return_value="https://jj.example/?operar=AAPL&lado=CALL"), \
                     patch("bollinger_phone_worker.aggregate_minute_bars", return_value=self.frame()), \
                     patch("bollinger_phone_worker.prepare_market_frame", return_value=self.frame()):
                 calendar.return_value.session.return_value = session
@@ -111,6 +112,8 @@ class BollingerPhoneTests(unittest.TestCase):
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 1)
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 0)
                 sender.assert_called_once()
+                self.assertEqual(sender.call_args.kwargs['reply_markup']['inline_keyboard'][0][0]['url'],
+                                 'https://jj.example/?operar=AAPL&lado=CALL')
                 with patch("bollinger_phone_worker.enabled", return_value=False), patch("bollinger_phone_worker.prepare_market_frame", return_value=self.frame("INFERIOR")):
                     result = tick(database, as_of=now, sender=sender)
                 self.assertEqual(result["state"], "VIGILANDO_SIN_AVISOS")

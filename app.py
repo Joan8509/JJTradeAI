@@ -1389,6 +1389,11 @@ def render_bollinger_dashboard() -> None:
         with st.container(border=True):
             st.markdown(f"**{item['symbol']} · {direction} · Salida en formación**")
             st.write(f"Disipador {signal['side'].lower()} · Precio observado: {signal['price']:.2f}")
+            if st.button('Operar',key='manual_review_'+item['symbol']):
+                st.query_params.update(operar=item['symbol'],
+                    lado='CALL' if signal['side']=='SUPERIOR' else 'PUT',
+                    senal=item['source_timestamp'])
+                st.rerun()
             if signal.get('ma_context'):
                 from bollinger_ma_context import context_text
                 st.caption(context_text(signal['ma_context']))
@@ -4732,6 +4737,17 @@ def render_report_audit() -> None:
 def render_telegram_connection() -> None:
     from telegram_alerts import CONFIG_PATH, TelegramError, connection, discover, save_connection, send_test
     st.subheader("Avisos a mi teléfono")
+    from manual_trade_links import app_url, save_app_url
+    with st.expander("Abrir la app desde los avisos"):
+        with st.form('telegram_app_link'):
+            address=st.text_input('Dirección de JJTrade que abre desde tu teléfono',value=app_url() or '',
+                placeholder='https://...')
+            if st.form_submit_button('Guardar dirección para Telegram'):
+                try:
+                    save_app_url(address)
+                    st.success('Los próximos avisos incluirán el botón para abrir esta compañía.')
+                except (ValueError,OSError) as error:
+                    st.error(str(error) if isinstance(error,ValueError) else 'No se pudo guardar la dirección.')
     st.caption("Conecta tu bot de Telegram. La clave se guarda protegida por Windows en este equipo.")
     st.markdown("**1 · Copia la clave de BotFather**")
     st.caption("Busca el mensaje de creación del bot y copia la clave de HTTP API. Pégala solo en este campo privado.")
@@ -4963,6 +4979,14 @@ def main() -> None:
     [data-testid="stVerticalBlockBorderWrapper"] {border-color: #29405c !important;}
     </style>""", unsafe_allow_html=True)
     _render_dashboard_visuals()
+    if st.query_params.get('operar'):
+        from manual_trade_panel import render_manual_trade
+        if st.button('Volver al radar'):
+            st.query_params.clear()
+            st.rerun()
+        render_manual_trade(st.query_params['operar'].strip().upper(),
+            st.query_params.get('lado','CALL'),st.query_params.get('senal'))
+        return
     if "risk_status" not in st.session_state:
         st.session_state["risk_status"] = GateStatus.NO_DISPONIBLE
     if "risk_symbol" not in st.session_state:
