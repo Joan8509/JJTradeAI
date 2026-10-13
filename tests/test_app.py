@@ -1166,8 +1166,8 @@ class StreamlitAppTests(unittest.TestCase):
         self.assertFalse(app.exception)
 
     def test_synthetic_demo_runs_full_analysis_without_exceptions(self) -> None:
-        app_path = Path(__file__).resolve().parents[1] / "app.py"
-        app = AppTest.from_file(str(app_path)).run(timeout=20)
+        # The analysis module is retained internally, outside the simplified navigation.
+        app = AppTest.from_string("from app import main, render_analysis\nmain()\nrender_analysis()").run(timeout=20)
         demo = next(
             item for item in app.checkbox if item.label == "Usar demostración sintética"
         )

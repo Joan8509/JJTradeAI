@@ -57,6 +57,7 @@ from paper_signal_evaluator import (
     evaluate_available_signals,
 )
 from watchlist_config import DEFAULT_BENCHMARKS_TEXT, DEFAULT_SYMBOLS_TEXT
+from alpaca_polling_stream import AlpacaPollingBarStream
 
 
 class AlertRepository:
@@ -912,6 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--database", default=str(DEFAULT_MARKET_DATABASE))
     parser.add_argument("--data-only", action="store_true", help="Solo ingiere datos y actualiza el radar de precios; no evalúa los otros detectores.")
+    parser.add_argument("--transport", choices=("auto", "websocket", "polling"), default="auto")
     parser.add_argument(
         "--benchmarks",
         default=DEFAULT_BENCHMARKS_TEXT,
@@ -1105,7 +1107,9 @@ def main() -> int:
                 )
 
     supervisor = ResilientStreamSupervisor(
-        stream_factory=lambda: AlpacaStockBarStream(config),
+        stream_factory=lambda: AlpacaPollingBarStream(config, continuity=continuity)
+        if args.transport == 'polling' or (args.transport == 'auto' and len(stream_symbols) > 30)
+        else AlpacaStockBarStream(config),
         continuity=continuity,
         health=ServiceHealthRepository(args.database),
     )
