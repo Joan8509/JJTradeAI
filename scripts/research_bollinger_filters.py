@@ -1,5 +1,6 @@
 """180-day chronological comparison with frozen candidate definitions."""
 import json
+import argparse
 import math
 import sqlite3
 import sys
@@ -84,6 +85,9 @@ def summarize(rows,candidate,period):
 
 
 def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--symbols', help='Optional frozen subset of the configured watchlist.')
+    args=parser.parse_args()
     now=pd.Timestamp(datetime.now(timezone.utc))
     cut=now-pd.Timedelta(days=180)
     validation=now-pd.Timedelta(days=60)
@@ -94,6 +98,12 @@ def main():
         sources=db.execute('SELECT DISTINCT symbol,provider,feed FROM minute_bars WHERE timestamp>=?',(cut.isoformat(),)).fetchall()
         sessions={d:pd.Timestamp(c) for d,c in db.execute('SELECT session_date,closes_at FROM market_sessions')}
     allowed=load_watchlist()['symbols']
+    if args.symbols:
+        requested={s.strip().upper() for s in args.symbols.split(',') if s.strip()}
+        unknown=requested-set(allowed)
+        if unknown:
+            raise ValueError('Symbols outside configured watchlist: '+','.join(sorted(unknown)))
+        allowed=tuple(s for s in allowed if s in requested)
     rows=[];coverage=[]
     for symbol,provider,feed in sources:
         if symbol not in allowed:continue
