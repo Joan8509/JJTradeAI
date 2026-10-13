@@ -4899,6 +4899,46 @@ def render_paper_entry_validation() -> None:
         st.caption("Resultado guardado con fecha, revisiones y evidencia. No permanece vigente indefinidamente.")
 
 
+def _render_dashboard_visuals() -> None:
+    background = _dashboard_background_data_uri()
+    st.markdown("""<style>
+    [data-testid="stAppViewContainer"], [data-testid="stMain"] {background:transparent!important}
+    .jj-dashboard-hero {padding:2rem 2.1rem;min-height:190px;display:flex;flex-direction:column;
+        justify-content:center;border:1px solid #31517a;border-radius:20px;margin-bottom:1.3rem;
+        background-color:#0c1a2d;background-size:cover;background-position:center right;
+        box-shadow:0 18px 45px rgba(0,0,0,.25)}
+    .jj-dashboard-hero .brand {color:#8dbfff;font-size:.75rem;font-weight:700;letter-spacing:.18em}
+    .jj-dashboard-hero .name {color:#f4f8ff;font-size:2.6rem;font-weight:800;letter-spacing:-.04em;margin:.35rem 0}
+    .jj-dashboard-hero .description {color:#c1d2e8;max-width:52%;font-size:1rem}
+    [data-testid="stTabs"] [role="tablist"] {gap:.4rem;padding:.35rem;background:rgba(12,26,45,.94);
+        border:1px solid #29405c;border-radius:12px;margin-bottom:1rem}
+    [data-testid="stTabs"] [role="tab"] {border-radius:8px;color:#bacbe1;padding:.75rem 1rem}
+    [data-testid="stTabs"] [role="tab"][aria-selected="true"] {background:#18365d;color:#a9d0ff}
+    [data-testid="stMetric"] {background:rgba(14,30,50,.95);border:1px solid #29405c;
+        border-radius:14px;padding:1rem}
+    [data-testid="stExpander"], [data-testid="stVerticalBlockBorderWrapper"] {
+        background:rgba(12,26,45,.96);border-radius:14px}
+    [data-testid="stButton"] button[kind="primary"] {background:#2563eb;border-radius:10px}
+    @media(max-width:700px) {
+        .jj-dashboard-hero {padding:1.4rem;min-height:160px;background-position:65% center}
+        .jj-dashboard-hero .name {font-size:2rem}
+        .jj-dashboard-hero .description {max-width:65%;font-size:.85rem}
+        [data-testid="stTabs"] [role="tab"] {font-size:.8rem;white-space:nowrap}
+    }
+    </style>""", unsafe_allow_html=True)
+    if background:
+        st.markdown(f"""<style>
+        .stApp {{background-image:linear-gradient(rgba(8,17,31,.86),rgba(8,17,31,.94)),url('{background}');
+            background-size:cover;background-position:center right;background-attachment:fixed}}
+        .jj-dashboard-hero {{background-image:linear-gradient(90deg,rgba(8,17,31,.96) 0%,
+            rgba(8,17,31,.82) 38%,rgba(8,17,31,.08) 100%),url('{background}')}}
+        </style>""", unsafe_allow_html=True)
+    st.markdown("""<div class="jj-dashboard-hero"><div class="brand">BOLLINGER · 15 MINUTOS</div>
+        <div class="name">JJTrade AI</div>
+        <div class="description">Observa la salida. Revisa tu gráfico. Decide tu operación.</div></div>""",
+        unsafe_allow_html=True)
+
+
 def main() -> None:
     """Construye la navegación principal de la aplicación."""
     st.markdown("""<style>
@@ -4917,8 +4957,7 @@ def main() -> None:
     }
     [data-testid="stVerticalBlockBorderWrapper"] {border-color: #29405c !important;}
     </style>""", unsafe_allow_html=True)
-    st.title("JJTrade AI")
-    st.caption("Metodología Investep · decisión asistida · ejecución humana")
+    _render_dashboard_visuals()
     if "risk_status" not in st.session_state:
         st.session_state["risk_status"] = GateStatus.NO_DISPONIBLE
     if "risk_symbol" not in st.session_state:
