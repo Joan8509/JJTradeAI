@@ -80,6 +80,15 @@ class TickGeometryTests(unittest.TestCase):
         self.assertIsNotNone(self.observe(104.,4,4)[0]['signal'])
         self.assertIsNone(self.observe(100.,5,5)[0]['signal'])
 
+    def test_previous_exposure_allows_only_new_inside_opening(self):
+        for previous,price,side in ((103.,105.,'SUPERIOR'),(97.,95.,'INFERIOR')):
+            self.geometry.status('CONECTADO',CANDLE-timedelta(seconds=1))
+            with patch.object(self.geometry,'_history',return_value=[100.]*19+[previous]):
+                self.observe(100.,1,10 if side=='SUPERIOR' else 20)
+                snapshot,reason=self.observe(price,2,11 if side=='SUPERIOR' else 21)
+            self.assertEqual(reason,'EXIT')
+            self.assertEqual(snapshot['signal']['side'],side)
+
     def test_mid_candle_start_waits_for_true_opening(self):
         self.geometry.status('CONECTADO',CANDLE+timedelta(seconds=1))
         snapshot,reason=self.observe(104.,2,1)

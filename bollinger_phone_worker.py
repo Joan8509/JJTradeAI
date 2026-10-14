@@ -24,7 +24,7 @@ from watchlist_config import load_watchlist
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
-STRATEGY_VERSION = "v3_bandas_en_apertura"
+STRATEGY_VERSION = "v4_apertura_dentro_sin_veto_previo"
 
 
 @contextmanager
@@ -88,8 +88,6 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
     """Regla única compartida por el radar y la reconstrucción histórica."""
     if not all(math.isfinite(float(value)) for value in (previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid)):
         return None
-    if not previous_lower <= previous_close <= previous_upper:
-        return None
     if opening is None or not math.isfinite(float(opening)):
         return None
     # Recalcula las bandas con los 19 cierres conocidos y la apertura, no con el
@@ -98,6 +96,9 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
     open_lower = previous_lower if opening_lower is None else opening_lower
     if not all(math.isfinite(float(v)) for v in (open_upper, open_lower)) or not open_lower <= opening <= open_upper:
         return None
+    # La vela observada abre dentro y después sale. Un cierre anterior apenas
+    # expuesto no invalida esa nueva salida; la apertura propia evita aceptar
+    # una continuación que ya comienza fuera.
     # Condición obligatoria de volatilidad: ambos disipadores deben abrirse
     # frente a la vela anterior. Una salida del precio o más ancho por una
     # sola banda no basta y ningún apoyo histórico puede saltarse esta regla.

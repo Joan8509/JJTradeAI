@@ -27,7 +27,7 @@ def main():
     lines = ["# Playback: salida de Bollinger con volatilidad, 15 minutos", "",
              f"Corte UTC: {now.isoformat()}. Ventana: últimos 30 días naturales.",
              f"Versión fija: {report['version']}. Fuente: barras disponibles; cada proveedor/feed se mantiene separado.", "",
-             "Se reconstruye minuto a minuto la vela de 15m en formación, sin usar su cierre futuro. Se exige cierre previo dentro de bandas, apertura dentro de las bandas previas, expansión de ambas bandas y pendiente del centro a favor de la salida. Se excluyen aperturas ya expuestas fuera de las bandas previas.", "",
+             "Se reconstruye minuto a minuto la vela de 15m en formación, sin usar su cierre futuro. Se exige apertura dentro de las bandas recalculadas a la apertura, expansión de ambas bandas, avance desde la apertura y pendiente del centro a favor de la salida. Se excluyen aperturas ya expuestas fuera de esas bandas; un cierre anterior expuesto no veta por sí solo una apertura propia dentro.", "",
              "Positivo significa que el precio del subyacente termina a favor de la salida. No mide rentabilidad de opciones ni incluye spread, comisiones o deslizamiento. Las alertas son observaciones tempranas. Este estudio no demuestra precisión futura.", "",
              "Los porcentajes usan ventanas completas sin solapamiento dentro de cada compañía/dirección/fuente/horizonte. Los casos sin datos completos se excluyen: esto puede sesgar la muestra. No se suman horizontes como operaciones independientes.", "",
              "## Continuidad por horizonte y fuente", "",

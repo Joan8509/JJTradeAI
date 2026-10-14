@@ -78,10 +78,24 @@ class BollingerPhoneTests(unittest.TestCase):
                 frame.loc[1, "bollinger_lower"] = lower
                 self.assertIsNone(detect_exit(frame),(side,upper,lower))
 
-    def test_previously_exposed_price_is_not_new_exit(self):
-        frame = self.frame()
-        frame.loc[0, "close"] = 103
-        self.assertIsNone(detect_exit(frame))
+    def test_previous_exposure_does_not_veto_a_new_inside_opening(self):
+        for side, previous_close in (('SUPERIOR',103),('INFERIOR',97)):
+            frame = self.frame(side)
+            frame.loc[0, "close"] = previous_close
+            self.assertEqual(detect_exit(frame)['side'],side)
+            frame.loc[1,'open']=104 if side=='SUPERIOR' else 96
+            self.assertIsNone(detect_exit(frame))
+
+    def test_meta_marked_candle_inside_opening_and_both_bands_open(self):
+        # Archived first minute of the marked 09:45-10:00 candle. Previous
+        # close is 0.1187 above its band; this candle's own opening is inside.
+        args=(751.63,751.5113244385666,739.7901755614334,745.65075,
+              753.765,752.9076822226375,739.2223177773624,746.065)
+        opening=dict(opening=751.31,opening_upper=752.2988241362781,
+                     opening_lower=739.5856758637218)
+        self.assertEqual(detect_values(*args,**opening),'SUPERIOR')
+        narrowed=list(args);narrowed[6]=args[2]
+        self.assertIsNone(detect_values(*narrowed,**opening))
 
     def test_midpoint_must_accompany_direction(self):
         frame = self.frame()

@@ -50,9 +50,10 @@ def assess(records, symbol, provider, feed, source_time, signal, *, available_at
 
 
 def historical_support(symbol, provider, feed, source_time, signal, *, available_at=None):
+    from bollinger_phone_worker import STRATEGY_VERSION
     try:
         memory = _read(str(MEMORY_PATH), MEMORY_PATH.stat().st_mtime_ns)
-        if memory.get('version') != 'v3_bandas_en_apertura':
+        if memory.get('version') != signal.get('version', STRATEGY_VERSION):
             return {'state': 'VERSION_MISMATCH'}
         result=assess(memory['records'], symbol, provider, feed, source_time, signal, available_at=available_at)
         result['retracement_support']=retracement_support(symbol,source_time,signal,provider=provider,feed=feed,available_at=available_at)
@@ -62,9 +63,10 @@ def historical_support(symbol, provider, feed, source_time, signal, *, available
 
 
 def retracement_support(symbol, source_time, signal, *, provider='ALPACA',feed='iex',available_at=None):
+    from bollinger_phone_worker import STRATEGY_VERSION
     try:
         memory=_read(str(RETRACEMENT_PATH),RETRACEMENT_PATH.stat().st_mtime_ns)
-        if memory['version']!='v3_bandas_en_apertura':return {'state':'VERSION_MISMATCH'}
+        if memory['version']!=signal.get('version', STRATEGY_VERSION):return {'state':'VERSION_MISMATCH'}
         available = available_at if available_at is not None else source_time+timedelta(minutes=1)
         if datetime.fromisoformat(memory['as_of'])>available:
             return {'state':'NOT_AVAILABLE_AT_SIGNAL_TIME'}

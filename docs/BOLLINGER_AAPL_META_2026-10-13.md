@@ -2,7 +2,27 @@
 
 Revisión realizada el 13 de octubre de 2026 después del cierre. El usuario
 reportó movimientos con buena volatilidad en ambas compañías sin notificación.
-No se modificaron reglas de entrada ni se reenviaron señales históricas.
+El diagnóstico inicial no modificó reglas. La corrección posterior de META
+se documenta a continuación. No se reenviaron señales históricas.
+
+## Corrección implementada después del diagnóstico
+
+La versión `v4_apertura_dentro_sin_veto_previo` retira el veto independiente
+de cierre anterior fuera. Exige la apertura propia dentro de sus bandas, la
+salida observada, avance desde apertura, punto medio alineado y ambas bandas
+abriéndose. No agrega reingresos, tolerancias o aperturas exteriores aceptadas.
+La regresión numérica de META reproduce la primera salida del minuto 09:45 y
+verifica que una sola banda abierta siga sin producir señal. La geometría de
+ticks prueba el cambio en ambos sentidos y las pruebas de saltos se conservan.
+La configuración y comparación de AAPL con TC2000 continúan pendientes; esta
+corrección no establece que su cálculo ya coincida con el gráfico del usuario.
+La memoria de v3 devuelve VERSION_MISMATCH para observaciones nuevas de v4.
+Los procesos existentes necesitan reinicio para cargar el cambio.
+Validación: 790 pruebas del conjunto completo pasaron. El playback de los
+minutos guardados de META genera ahora la señal superior de ese bloque en
+la primera vela de minuto, con disponibilidad nominal a las 09:46 ET. Eso no
+equivale a una entrega histórica real: la recepción registrada fue posterior
+y el archivo no contiene ticks de esa mañana.
 
 ## Estado tras la corrección del usuario
 
@@ -24,8 +44,8 @@ al feed, horario o fórmula.
 
 META tiene un veto reproducible independiente: la apertura del bloque
 señalado está dentro incluso con el cálculo actual, pero la regla también
-exige el cierre anterior dentro. Debe revisarse esa condición respecto a la
-definición de la estrategia; no se ha cambiado en este diagnóstico.
+exigía el cierre anterior dentro. Ese veto se retiró en la versión v4, según
+la corrección documentada al principio.
 
 ## Corrección después de recibir las capturas
 

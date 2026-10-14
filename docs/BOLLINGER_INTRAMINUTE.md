@@ -18,11 +18,16 @@ La referencia anterior usa sus 20 cierres ya terminados. Exige la última barra
 de cierre oficial anterior; al abrir la sesión verifica la sesión previa del
 calendario. No convierte una vela todavía abierta en una referencia cerrada.
 
-La regla `v3_bandas_en_apertura` permanece compartida con el playback: cierre
-anterior dentro de bandas, apertura dentro de las bandas recalculadas a la
+La regla `v4_apertura_dentro_sin_veto_previo` permanece compartida con el
+playback: apertura dentro de las bandas recalculadas a la
 apertura, **ambas bandas abriéndose**, exposición del precio, avance desde la
 apertura y punto medio en la misma dirección. No se agregan umbrales de fuerza
 sin evidencia. SMA, barreras y patrones históricos siguen siendo descriptivos.
+Se retiró el veto de cierre anterior fuera: no forma parte de la apertura
+propia dentro seguida de salida. El caso META del bloque 09:45–10:00 del
+13/10/2026 reproduce ese bloqueo. La apertura propia fuera continúa excluida;
+no se añadieron tolerancias, reingresos ni valores futuros. Las memorias de
+playback de v3 no se aplican a eventos de v4 hasta reconstruirlas con esa regla.
 
 Un stream conectado antes de comenzar la vela usa su primera operación apta
 observada como apertura provisional. Cuando llega la primera barra oficial,
@@ -94,7 +99,7 @@ un bloqueo persistente no detiene la vigilancia y se vuelve a intentar en el
 siguiente ciclo. Esto no confirma entrega al teléfono: requiere comprobar el
 proceso, su heartbeat y los envíos reales durante la sesión.
 
-Validación: las 787 pruebas del conjunto completo pasaron. Las pruebas
+Validación: las 790 pruebas del conjunto completo pasaron. Las pruebas
 incluyen primera vela de sesión, ambos lados, expansión
 obligatoria, saltos, reconexión, retracción antes del envío, duplicados,
 condiciones de operación, correcciones y bloqueo del analizador de barras.
