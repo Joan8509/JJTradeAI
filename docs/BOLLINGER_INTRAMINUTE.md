@@ -81,7 +81,20 @@ después de confirmar la suscripción a operaciones. El radar informa
 La ausencia de heartbeat o el modo `MINUTE_BARS` no confirman activación rápida.
 Fuera de sesión no se generan avisos. No requiere aprobación de Schwab.
 
-Validación: las 768 pruebas del conjunto completo pasaron. Las pruebas
+El primer evento también guarda el contexto Bollinger de Hora y Diario en el
+hilo de apoyo, sin añadir texto a Telegram ni bloquear avisos. Se distinguen
+bandas observadas en formación y bandas de la última vela cerrada. Solo usa
+minutos completos recibidos antes del instante de la señal. El primer tick
+de la sesión puede calcular el contexto con cierres anteriores sin inventar
+una apertura. La falta de historial se registra como desconocida. El playback
+no validó estos contextos como filtros de entrada ni como aprobación automática.
+
+El radar reintenta publicar su estado si Windows bloquea brevemente el archivo;
+un bloqueo persistente no detiene la vigilancia y se vuelve a intentar en el
+siguiente ciclo. Esto no confirma entrega al teléfono: requiere comprobar el
+proceso, su heartbeat y los envíos reales durante la sesión.
+
+Validación: las 787 pruebas del conjunto completo pasaron. Las pruebas
 incluyen primera vela de sesión, ambos lados, expansión
 obligatoria, saltos, reconexión, retracción antes del envío, duplicados,
 condiciones de operación, correcciones y bloqueo del analizador de barras.

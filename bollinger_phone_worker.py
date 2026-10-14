@@ -166,6 +166,9 @@ class SignalSupportWorker:
                     event['feed'], source, event, available_at=available)
                 event['historical_support'] = historical_support(event['symbol'], event['provider'],
                     event['feed'], source, event, available_at=available)
+                from bollinger_volatility_context import live_volatility_context
+                event['higher_volatility'] = live_volatility_context(database,event['symbol'],event['provider'],
+                    event['feed'],source,event,available_at=available)
                 with _database(database) as db:
                     db.execute('UPDATE bollinger_live_events SET payload_json=? WHERE event_key=?',
                                (json.dumps(event), key))
@@ -176,6 +179,7 @@ class SignalSupportWorker:
                         if payload.get('signal'):
                             payload['signal']['ma_context'] = event['ma_context']
                             payload['signal']['historical_support'] = event['historical_support']
+                            payload['signal']['higher_volatility'] = event['higher_volatility']
                             db.execute('UPDATE bollinger_radar_state SET payload_json=? WHERE symbol=? '
                                        'AND source_timestamp=?', (json.dumps(payload),event['symbol'],event['source_timestamp']))
             except Exception:
@@ -353,6 +357,23 @@ def _minute_signal(database, store, symbol, now, has_received):
     return provider,feed,source_time,received,signal,float(aggregated.iloc[-1]['open'])
 
 
+def write_status(status, path=STATUS_PATH):
+    """A brief Windows reader/antivirus lock must not kill Telegram monitoring."""
+    temporary=path.with_suffix('.tmp')
+    try:
+        temporary.write_text(json.dumps(status),encoding='utf-8')
+        for attempt in range(4):
+            try:
+                temporary.replace(path)
+                return True
+            except PermissionError:
+                if attempt<3:
+                    time.sleep(.025)
+    except OSError:
+        return False
+    return False  # Keep monitoring; try publishing status next cycle.
+
+
 def main():
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     lock = (CONFIG_PATH.parent / "radar.lock").open("a+b")
@@ -376,9 +397,7 @@ def main():
         except Exception:
             status = {"state": "ERROR", "error": "No se pudo completar la revisión. Revisa los datos y la conexión."}
         status.update({"heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid()})
-        temporary = STATUS_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps(status), encoding="utf-8")
-        temporary.replace(STATUS_PATH)
+        write_status(status)
         time.sleep(.25 if status.get('price_mode')=='TRADES' else 1)
 
 

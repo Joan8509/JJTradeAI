@@ -1,5 +1,10 @@
 """Observed and last-closed Hour/Daily Bollinger context; no entry gates."""
 import math
+from bisect import bisect_left
+from contextlib import closing
+from functools import lru_cache
+from pathlib import Path
+import sqlite3
 import pandas as pd
 
 from bollinger_phone_worker import bands_at_open
@@ -39,6 +44,8 @@ class HigherVolatilityHistory:
     def __init__(self,bars,sessions):
         self.sessions=sessions
         regular=regular_frame(bars,sessions)
+        if regular.empty:
+            raise ValueError('No hay historial regular para el contexto de volatilidad.')
         self.records={};self.positions={}
         ordinals={'1H':{},'1D':{}}
         hour_ordinal=0
@@ -47,6 +54,7 @@ class HigherVolatilityHistory:
             for start in pd.date_range(opening,close-pd.Timedelta(nanoseconds=1),freq='h'):
                 ordinals['1H'][start]=hour_ordinal
                 hour_ordinal+=1
+        self.ordinals=ordinals
         local_keys=regular.date.dt.tz_convert('America/New_York').dt.date.astype(str)
         hour_keys=(regular.date-pd.Timedelta(minutes=30)).dt.floor('h')+pd.Timedelta(minutes=30)
         last={'1H':regular.groupby(hour_keys).date.max().to_dict(),
@@ -67,6 +75,7 @@ class HigherVolatilityHistory:
                     'opening_minute_observed':first[timeframe].get(key)==start})
                 positions[key]=i
             self.records[timeframe]=records;self.positions[timeframe]=positions
+        self.record_ordinals={tf:[r['ordinal'] for r in records] for tf,records in self.records.items()}
 
     def _known(self,timeframe,first,last):
         if first<0:return False
@@ -74,19 +83,31 @@ class HigherVolatilityHistory:
         return (len(rows)==last-first+1 and rows[-1]['ordinal']-rows[0]['ordinal']==last-first
                 and all(r['closing_minute_observed'] and math.isfinite(float(r['close'])) and r['close']>0 for r in rows))
 
-    def at(self,event):
+    def at(self,event,*,available_at=None):
         stamp=pd.Timestamp(event['source_timestamp'])
-        available=pd.Timestamp(event['detected_at'])
+        available=pd.Timestamp(available_at if available_at is not None else event['detected_at'])
         price=float(event['price']);side=event['side']
         daily_key=stamp.tz_convert('America/New_York').date().isoformat()
         hour_key=(stamp-pd.Timedelta(minutes=30)).floor('h')+pd.Timedelta(minutes=30)
         frames={}
         for timeframe,key in (('1H',hour_key),('1D',daily_key)):
             records=self.records[timeframe];position=self.positions[timeframe].get(key)
+            virtual=position is None
             if position is None:
-                frames[timeframe]={'observed':{'state':'UNKNOWN','reason':'MISSING_PARENT'},'last_closed':{'state':'UNKNOWN','reason':'MISSING_PARENT'}}
-                continue
-            current=records[position]
+                # A first trade can arrive before the first minute bar of its
+                # hour/day. Calculate from prior closes plus that observed
+                # price; never invent a candle opening or wait a whole minute.
+                ordinal=self.ordinals[timeframe].get(key)
+                session=self.sessions.get(daily_key)
+                if ordinal is None or session is None:
+                    frames[timeframe]={'observed':{'state':'UNKNOWN','reason':'MISSING_PARENT'},'last_closed':{'state':'UNKNOWN','reason':'MISSING_PARENT'}}
+                    continue
+                position=bisect_left(self.record_ordinals[timeframe],ordinal)
+                start=hour_key if timeframe=='1H' else session[0]
+                end=min(start+pd.Timedelta(hours=1),session[1]) if timeframe=='1H' else session[1]
+                current={'start':start,'end':end,'ordinal':ordinal,'opening_minute_observed':False}
+            else:
+                current=records[position]
             partial=available<current['end']
             preceding_period_present=(position>0 and current['ordinal']-records[position-1]['ordinal']==1)
             observed={'state':'UNKNOWN','reason':'MISSING_20_REFERENCE_CLOSING_MINUTES'}
@@ -97,9 +118,9 @@ class HigherVolatilityHistory:
                 'available_at':available.isoformat(),'opening_minute_observed':current['opening_minute_observed']})
             # At an exact boundary the containing candle has just closed. Do
             # not include a later parent candle or the day's eventual close.
-            closed_position=position if current['end']<=available else position-1
+            closed_position=position if current['end']<=available and not virtual else position-1
             confirmed={'state':'UNKNOWN','reason':'MISSING_21_REFERENCE_CLOSING_MINUTES'}
-            if (not partial or preceding_period_present) and closed_position>=0 and self._known(timeframe,closed_position-20,closed_position):
+            if (not virtual or partial) and (not partial or preceding_period_present) and closed_position>=0 and self._known(timeframe,closed_position-20,closed_position):
                 closed=records[closed_position]
                 confirmed=measure_volatility([r['close'] for r in records[closed_position-20:closed_position]],
                     float(closed['close']),side,observed_price=price)
@@ -108,3 +129,33 @@ class HigherVolatilityHistory:
             frames[timeframe]={'observed':observed,'last_closed':confirmed}
         return {'available_at':available.isoformat(),'price':price,'side':side,'frames':frames,
                 'authority':'DESCRIPTIVE_ONLY_NO_APPROVAL_NO_SUPPRESSION'}
+
+
+@lru_cache(maxsize=32)
+def _live_history(database,symbol,provider,feed,available_stamp):
+    available=pd.Timestamp(available_stamp)
+    # Minute time labels are their start. Require completion AND receipt by
+    # the signal time, excluding later revisions/backfills from this snapshot.
+    uri='file:'+Path(database).resolve().as_posix()+'?mode=ro'
+    with closing(sqlite3.connect(uri,uri=True,timeout=5)) as db:
+        sessions={key:(pd.Timestamp(op),pd.Timestamp(close)) for key,op,close in db.execute(
+            'SELECT session_date,opens_at,closes_at FROM market_sessions')}
+        bars=pd.read_sql_query('SELECT timestamp AS date,open,high,low,close,volume FROM minute_bars '
+            'WHERE symbol=? AND provider=? AND feed=? AND timestamp>=? AND timestamp<=? AND received_at<=? ORDER BY timestamp',db,
+            params=(symbol,provider,feed,(available-pd.Timedelta(days=480)).isoformat(),
+                    (available-pd.Timedelta(minutes=1)).isoformat(),available.isoformat()))
+    return HigherVolatilityHistory(bars,sessions)
+
+
+def live_volatility_context(database,symbol,provider,feed,source_time,signal,*,available_at):
+    """Background-only snapshot; never gates or delays a Telegram notice."""
+    available=pd.Timestamp(available_at)
+    try:
+        history=_live_history(str(database),symbol,provider,feed,available.isoformat())
+        return history.at({'source_timestamp':pd.Timestamp(source_time).isoformat(),
+            'detected_at':available.isoformat(),'price':signal['price'],'side':signal['side']},available_at=available)
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error,pd.errors.DatabaseError):
+        return {'available_at':available.isoformat(),'price':signal['price'],'side':signal['side'],
+            'frames':{tf:{'observed':{'state':'UNKNOWN','reason':'HISTORY_UNAVAILABLE'},
+                          'last_closed':{'state':'UNKNOWN','reason':'HISTORY_UNAVAILABLE'}} for tf in ('1H','1D')},
+            'authority':'DESCRIPTIVE_ONLY_NO_APPROVAL_NO_SUPPRESSION'}

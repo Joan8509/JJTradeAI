@@ -11,6 +11,22 @@ from datetime import datetime, timezone
 
 
 class BollingerPhoneTests(unittest.TestCase):
+    def test_status_reader_lock_retries_without_stopping_monitor(self):
+        from bollinger_phone_worker import write_status
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/'status.json'
+            with patch('pathlib.Path.replace',side_effect=[PermissionError('reader lock'),None]) as replace, \
+                 patch('bollinger_phone_worker.time.sleep'):
+                self.assertTrue(write_status({'state':'VIGILANDO'},target))
+                self.assertEqual(replace.call_count,2)
+            # A persistent lock is not fatal either; the next cycle tries again.
+            with patch('pathlib.Path.replace',side_effect=PermissionError('reader lock')), \
+                 patch('bollinger_phone_worker.time.sleep'):
+                self.assertFalse(write_status({'state':'VIGILANDO'},target))
+            self.assertTrue(write_status({'state':'VIGILANDO'},target))
+            self.assertEqual(json.loads(target.read_text(encoding='utf-8'))['state'],'VIGILANDO')
+
     def frame(self, side="SUPERIOR"):
         return pd.DataFrame([
             {"date": "2026-10-08T14:00:00Z", "close": 100, "bollinger_upper": 102, "bollinger_lower": 98, "bollinger_mid": 100},

@@ -208,13 +208,19 @@ class TickNoticeTests(unittest.TestCase):
                 db.execute('INSERT INTO bollinger_live_events VALUES(?,?,?)',('test',now.isoformat(),json.dumps(event)))
             db.close()
             with patch('bollinger_phone_worker.live_context',return_value={'state':'DESCRIPTIVO'}) as context, \
-                 patch('bollinger_pattern_memory.historical_support',return_value={'state':'INSUFFICIENT'}) as history:
+                 patch('bollinger_pattern_memory.historical_support',return_value={'state':'INSUFFICIENT'}) as history, \
+                 patch('bollinger_volatility_context.live_volatility_context',return_value={'authority':'DESCRIPTIVE_ONLY'}) as volatility:
                 worker=SignalSupportWorker()
                 try:
                     worker.submit(database,'test',event)
                     worker.queue.join()
                     self.assertEqual(context.call_args.kwargs['available_at'],now)
                     self.assertEqual(history.call_args.kwargs['available_at'],now)
+                    self.assertEqual(volatility.call_args.kwargs['available_at'],now)
+                    with sqlite3.connect(database) as db:
+                        saved=json.loads(db.execute('SELECT payload_json FROM bollinger_live_events WHERE event_key=?',('test',)).fetchone()[0])
+                    db.close()
+                    self.assertEqual(saved['higher_volatility'],{'authority':'DESCRIPTIVE_ONLY'})
                 finally:
                     worker.close()
 

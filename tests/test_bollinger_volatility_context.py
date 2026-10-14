@@ -1,7 +1,10 @@
 """Known-at-signal Hour/Daily geometry, calendar boundaries and unknown data."""
 import unittest
+from pathlib import Path
+import tempfile
+import sqlite3
 import pandas as pd
-from bollinger_volatility_context import HigherVolatilityHistory,measure_volatility
+from bollinger_volatility_context import HigherVolatilityHistory,measure_volatility,live_volatility_context,_live_history
 from scripts.study_bollinger_higher_volatility import context_conditions,independent_rows,stats
 
 
@@ -28,6 +31,52 @@ def event(sessions,minute=16):
 
 
 class HigherVolatilityTests(unittest.TestCase):
+    def test_first_tick_of_session_has_hour_day_context_before_first_minute_bar(self):
+        bars,sessions=fixture();day=sorted(sessions)[-1];opening=sessions[day][0]
+        known=bars[bars.date<opening]
+        signal={'source_timestamp':(opening+pd.Timedelta(milliseconds=250)).isoformat(),
+                'detected_at':(opening+pd.Timedelta(milliseconds=300)).isoformat(),
+                'price':104.,'side':'SUPERIOR'}
+        context=HigherVolatilityHistory(known,sessions).at(signal,available_at=signal['source_timestamp'])
+        for tf in ('1H','1D'):
+            self.assertEqual(context['frames'][tf]['observed']['state'],'DESCRIPTIVE')
+            self.assertTrue(context['frames'][tf]['observed']['provisional'])
+            self.assertFalse(context['frames'][tf]['observed']['opening_minute_observed'])
+            self.assertEqual(context['frames'][tf]['last_closed']['state'],'DESCRIPTIVE')
+
+    def test_live_snapshot_excludes_not_yet_closed_and_later_received_minutes(self):
+        from market_store import MarketBarStore
+        from market_calendar import MarketSession,MarketSessionRepository
+        bars,sessions=fixture();signal=event(sessions,16)
+        available=pd.Timestamp(signal['source_timestamp'])+pd.Timedelta(milliseconds=250)
+        # A genuine current price can be observed within minute 16 before its
+        # final minute-close history exists. Later daily values must not leak.
+        with tempfile.TemporaryDirectory() as directory:
+            database=Path(directory)/'market.db'
+            MarketSessionRepository(database).upsert(tuple(MarketSession(pd.Timestamp(key).date(),op.to_pydatetime(),close.to_pydatetime()) for key,(op,close) in sessions.items()))
+            MarketBarStore(database).upsert_frame(bars,symbol='AAPL',provider='ALPACA',feed='iex')
+            with sqlite3.connect(database) as db:
+                db.execute("UPDATE minute_bars SET received_at='2026-08-01T00:00:00+00:00'")
+                # Deliberately poison data whose interval has not closed yet.
+                db.execute('UPDATE minute_bars SET close=9999,high=9999 WHERE timestamp>=?',(pd.Timestamp(signal['source_timestamp']).isoformat(),))
+            db.close()
+            _live_history.cache_clear()
+            actual=live_volatility_context(database,'AAPL','ALPACA','iex',signal['source_timestamp'],signal,available_at=available)
+            prefix=bars[bars.date+pd.Timedelta(minutes=1)<=available]
+            expected=HigherVolatilityHistory(prefix,sessions).at(signal,available_at=available)
+            self.assertEqual(actual,expected)
+            # Losing a previous scheduled closing minute produces UNKNOWN,
+            # not a fabricated confirmation or a low-volatility classification.
+            prior_day=sorted(sessions)[-2];late=sessions[prior_day][1]-pd.Timedelta(minutes=1)
+            with sqlite3.connect(database) as db:
+                db.execute('UPDATE minute_bars SET received_at=? WHERE timestamp=?',
+                    ((available+pd.Timedelta(seconds=1)).isoformat(),late.isoformat()))
+            db.close()
+            _live_history.cache_clear()
+            later=live_volatility_context(database,'AAPL','ALPACA','iex',signal['source_timestamp'],signal,available_at=available)
+            self.assertEqual(later['frames']['1D']['observed']['state'],'UNKNOWN')
+            _live_history.cache_clear()
+
     def test_amplitude_is_separate_from_net_direction_and_not_intraminute_high(self):
         row={'source_timestamp':'2026-10-13T14:00:00+00:00',
              'outcomes':{'15':{'first_pullback_minutes':2,'points':[
