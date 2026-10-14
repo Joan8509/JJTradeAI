@@ -4,6 +4,29 @@ Revisión realizada el 13 de octubre de 2026 después del cierre. El usuario
 reportó movimientos con buena volatilidad en ambas compañías sin notificación.
 No se modificaron reglas de entrada ni se reenviaron señales históricas.
 
+## Estado tras la corrección del usuario
+
+El usuario aclara expresamente que AMBAS velas señaladas abrieron dentro en
+TC2000. Por ello, la interpretación anterior de AAPL como salida tras volver
+dentro no constituye una descripción validada del caso del usuario. La
+reconstrucción numérica con Alpaca/SMA queda como diagnóstico del cálculo
+actual de la app, no como prueba de que el gráfico TC2000 abrió fuera.
+
+También se retira cualquier propuesta de modificar la estrategia para
+aceptar aperturas exteriores a partir de estas capturas. El objetivo continúa
+siendo detectar la apertura dentro y la salida con ambas bandas abriéndose.
+Se solicitó tipo de media y desplazamiento del Bollinger TC2000 para comparar
+configuración. SMA de las medias 20/40/100/200 no verifica automáticamente
+los ajustes de este otro indicador. Si coinciden, habrá que contrastar los
+cierres de referencia y valores de bandas, distinguiendo instantáneas de
+apertura de bandas finales. Ninguna diferencia se atribuye aún con certeza
+al feed, horario o fórmula.
+
+META tiene un veto reproducible independiente: la apertura del bloque
+señalado está dentro incluso con el cálculo actual, pero la regla también
+exige el cierre anterior dentro. Debe revisarse esa condición respecto a la
+definición de la estrategia; no se ha cambiado en este diagnóstico.
+
 ## Corrección después de recibir las capturas
 
 Las flechas del gráfico de 15 minutos apuntan a la segunda vela de la sesión,
@@ -32,9 +55,9 @@ Los minutos de las 09:45–09:48 de AAPL registran recepción a las
 importante en el sistema antiguo. Son marcas de la versión almacenada, no
 un historial completo de primeras recepciones y correcciones.
 
-Una reconstrucción local exploratoria separa apertura dentro de una nueva
-salida tras volver dentro. Esa variante no está aplicada al radar. Hace falta
-definir si el segundo escenario pertenece a la estrategia solicitada. La
+Una reconstrucción local exploratoria separaba apertura dentro de una nueva
+salida tras volver dentro. Esa variante no está aplicada al radar y ha quedado
+superada por la aclaración del usuario sobre la apertura de ambas velas. La
 apertura de ambas bandas permanece obligatoria en los escenarios evaluados;
 el gráfico estático final no sustituye los precios disponibles en tiempo real.
 
@@ -86,6 +109,6 @@ Su activación no cambia esas reglas geométricas.
 
 Las capturas posteriores permiten alinear las velas señaladas y la dirección
 superior, según la corrección al principio del documento. Quedan pendientes
-los parámetros completos y la definición de salida tras volver dentro.
+los parámetros completos y la comparación de bandas de apertura.
 Ninguna hipótesis se convierte aquí en un nuevo filtro o una aprobación de
 operación. El profit reportado no se verifica sin las ejecuciones de opciones.
