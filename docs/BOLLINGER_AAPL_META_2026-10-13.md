@@ -68,9 +68,13 @@ partir de su primer minuto completo (disponibilidad nominal 09:46). Esto prueba
 el cambio de regla, pero no verifica todavía la vela denominada 10:00 por el
 usuario ni confirma una entrega histórica de Telegram.
 
-El radar se reinició con v4. El buscador que se inició antes del cambio
-requiere reinicio para cargarla. Las memorias descriptivas de v3 no se aplican
-a nuevas observaciones de v4 hasta reconstruirlas con la misma regla.
+El radar se reinició con v4. En la verificación posterior del 13/10 por la
+noche, el buscador ya se había reiniciado a las 21:36:25 ET, después de la
+corrección. Está conectado con las 17 compañías y heartbeat reciente; Telegram
+está habilitado y vinculado. No requiere otro reinicio para este cambio.
+Las memorias descriptivas de v3 no se aplican a nuevas observaciones de v4
+hasta reconstruirlas con la misma regla. La activación no sustituye la
+comparación pendiente con la vela y las bandas de TC2000.
 
 ## Comparación pendiente
 
