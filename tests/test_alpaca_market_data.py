@@ -17,6 +17,7 @@ from alpaca_market_data import (
     build_alpaca_data_bundle,
 )
 from data_providers import DataProviderKind
+from live_market import NoMarketDataError
 
 
 START = datetime(2026, 7, 20, 13, 30, tzinfo=timezone.utc)
@@ -24,6 +25,35 @@ END = datetime(2026, 7, 20, 20, 0, tzinfo=timezone.utc)
 
 
 class AlpacaMarketDataTests(unittest.TestCase):
+    def test_spcx_history_starts_with_current_issuer_and_filters_old_ticker(self):
+        from urllib.parse import urlparse, parse_qs
+        calls=[]
+        def transport(request):
+            calls.append(request)
+            return {'bars':[
+                {'t':'2026-03-20T13:30:00Z','o':20,'h':21,'l':19,'c':20,'v':100},
+                {'t':'2026-07-20T13:30:00Z','o':140,'h':141,'l':139,'c':140,'v':100}],
+                'next_page_token':None}
+        provider=AlpacaMarketDataProvider(AlpacaMarketConfig('key','secret'),transport=transport)
+        frame=provider.fetch_minute_bars('spcx',start=START-timedelta(days=365),end=END)
+        self.assertEqual(parse_qs(urlparse(calls[0].full_url).query)['start'],['2026-06-12T00:00:00+00:00'])
+        self.assertEqual(len(frame),1)
+        self.assertEqual(frame.iloc[0].close,140)
+
+    def test_spcx_period_before_ipo_does_not_request_old_etf(self):
+        def transport(request):
+            self.fail('The old issuer must not be requested.')
+        provider=AlpacaMarketDataProvider(AlpacaMarketConfig('key','secret'),transport=transport)
+        with self.assertRaises(NoMarketDataError):
+            provider.fetch_minute_bars('SPCX',start=START-timedelta(days=365),
+                                      end=datetime(2026,6,11,20,tzinfo=timezone.utc))
+
+    def test_spcx_response_containing_only_former_issuer_is_no_data(self):
+        provider=AlpacaMarketDataProvider(AlpacaMarketConfig('key','secret'),transport=lambda request:
+            {'bars':[{'t':'2026-03-20T13:30:00Z','o':20,'h':21,'l':19,'c':20,'v':100}]})
+        with self.assertRaises(NoMarketDataError):
+            provider.fetch_minute_bars('SPCX',start=START-timedelta(days=365),end=END)
+
     def test_one_socket_subscribes_bars_and_trades_and_handles_corrections(self):
         sockets,subscriptions,trades,bars,statuses=[],[],[],[],[]
         class Socket:

@@ -113,8 +113,10 @@ def detect_values(previous_close, previous_upper, previous_lower, previous_mid, 
 
 def message_for(symbol, signal, source_time):
     from price_ranges import load_option_price_ranges
+    from stock_instruments import STOCK_INSTRUMENTS
     reference = load_option_price_ranges().get(symbol)
-    company = f"{symbol} · {reference['name']}" if reference else symbol
+    name = reference['name'] if reference else STOCK_INSTRUMENTS.get(symbol, {}).get('name')
+    company = f"{symbol} · {name}" if name else symbol
     local = pd.Timestamp(signal.get('candle', source_time)).to_pydatetime().astimezone(ZoneInfo("America/New_York"))
     price_range = f"${reference['optimal_low']:g} – ${reference['optimal_high']:g}" if reference else "Sin rango definido"
     return (f"{company}\n"

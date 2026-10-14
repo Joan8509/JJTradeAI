@@ -129,6 +129,13 @@ class BollingerPhoneTests(unittest.TestCase):
         signal['side']='INFERIOR'
         self.assertIn('Salida: inferior',message_for('AAPL',signal,datetime(2026,10,8,14,16,tzinfo=timezone.utc)))
 
+    def test_spcx_notice_names_current_issuer_without_inventing_price_range(self):
+        signal=detect_exit(self.frame())
+        lines=message_for('SPCX',signal,datetime(2026,10,8,14,16,tzinfo=timezone.utc)).splitlines()
+        self.assertEqual(len(lines),4)
+        self.assertEqual(lines[0],'SPCX · SpaceX')
+        self.assertEqual(lines[3],'Rango de precios: Sin rango definido')
+
     def test_only_one_notice_per_candle_and_restart(self):
         now = datetime(2026, 10, 8, 14, 17, tzinfo=timezone.utc)
         session = SimpleNamespace(opens_at=now.replace(hour=13, minute=30), closes_at=now.replace(hour=20, minute=0))

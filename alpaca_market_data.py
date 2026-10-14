@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from data_providers import DataBundle, DataProviderKind, prepare_market_frame
+from stock_instruments import STOCK_INSTRUMENTS
 from live_market import (
     MarketBar,
     NoMarketDataError,
@@ -84,6 +85,11 @@ class AlpacaMarketDataProvider:
         symbol = symbol.strip().upper()
         if not symbol:
             raise ValueError("El símbolo no puede estar vacío.")
+        history_start = STOCK_INSTRUMENTS.get(symbol, {}).get('history_start')
+        if history_start is not None:
+            start = max(start, history_start)
+            if end < start:
+                raise NoMarketDataError(f"No hay historial de este instrumento para {symbol} antes de su inicio de cotización.")
         rows: list[dict[str, Any]] = []
         page_token: str | None = None
         while True:
@@ -122,7 +128,13 @@ class AlpacaMarketDataProvider:
                 "volume": [row["v"] for row in rows],
             }
         )
-        return normalize_minute_bars(frame)
+        frame = normalize_minute_bars(frame)
+        if history_start is not None:
+            # Defend against an upstream response including the prior issuer.
+            frame = frame.loc[frame.date >= history_start].reset_index(drop=True)
+            if frame.empty:
+                raise NoMarketDataError(f"Alpaca no devolvió barras de la identidad actual de {symbol}.")
+        return frame
 
     def fetch_bundle(
         self,
