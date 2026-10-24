@@ -1,6 +1,7 @@
 """Pruebas para la compuerta configurable de opciones."""
 
 from datetime import date
+from dataclasses import replace
 import unittest
 
 from analysis_models import GateStatus
@@ -76,6 +77,16 @@ class RiskEngineTests(unittest.TestCase):
             self.quote, limits, as_of=date(2026, 6, 24)
         )
         self.assertEqual(result.status, GateStatus.RECHAZADO)
+
+    def test_exact_five_cent_boundary_is_inclusive(self):
+        limits=RiskLimits(.05,100.,10.,1,1000.)
+        for bid,ask in ((.10,.15),(.01,.06),(1.,1.05),(1.95,2.)):
+            quote=replace(self.quote,bid=bid,ask=ask)
+            with self.subTest(bid=bid,ask=ask):
+                self.assertEqual(evaluate_option_risk(quote,limits,as_of=date(2026,6,24)).status,
+                    GateStatus.APROBADO)
+        self.assertEqual(evaluate_option_risk(replace(self.quote,bid=.10,ask=.150001),
+            limits,as_of=date(2026,6,24)).status,GateStatus.RECHAZADO)
 
     def test_expired_contract_is_rejected_even_without_limits(self) -> None:
         expired = OptionQuote(

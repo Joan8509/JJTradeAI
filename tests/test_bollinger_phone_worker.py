@@ -1,3 +1,4 @@
+from contextlib import closing
 import unittest
 import tempfile
 import sqlite3
@@ -11,6 +12,52 @@ from datetime import datetime, timezone
 
 
 class BollingerPhoneTests(unittest.TestCase):
+    def test_authorized_one_percent_minimum_in_both_directions(self):
+        for price,mid,side in ((202,150.5,'SUPERIOR'), (98,149.5,'INFERIOR')):
+            args=(150,200,100,150,price,201,99,mid)
+            self.assertEqual(detect_values(*args,opening=150),side)
+            for upper,lower in ((201,99.5),(200.5,99)):
+                weak=(*args[:5],upper,lower,mid)
+                self.assertIsNone(detect_values(*weak,opening=150))
+
+    def test_minimum_does_not_override_opening_midpoint_or_direction(self):
+        self.assertIsNone(detect_values(150,200,100,150,202,201,99,149,opening=150))
+        self.assertIsNone(detect_values(150,200,100,150,202,201,99,151,opening=203))
+        self.assertIsNone(detect_values(150,200,100,150,198,201,99,151,opening=150))
+
+    def test_signal_retains_numeric_expansion_without_changing_message_format(self):
+        signal=detect_exit(self.frame())
+        self.assertEqual(signal['band_expansion']['required_pct'],1)
+        self.assertGreaterEqual(signal['band_expansion']['minimum_pct'],1)
+        self.assertEqual(len(message_for('AAPL',signal,datetime.now(timezone.utc)).splitlines()),4)
+
+    def test_legacy_notice_alias_blocks_new_source_after_restart(self):
+        from bollinger_phone_worker import candle_keys, claim_notice
+        for state in ('ENVIADO','ENVIANDO','ENVIO_NO_CONFIRMADO'):
+            with tempfile.TemporaryDirectory() as directory:
+                path=Path(directory)/'market.db'
+                with closing(sqlite3.connect(path)) as db, db:
+                    db.execute('CREATE TABLE bollinger_phone_notifications(event_key TEXT PRIMARY KEY,state TEXT,attempted_at TEXT)')
+                    keys=candle_keys('v1|chat|ALPACA|iex|MU','2026-10-14T11:30:00-04:00','INFERIOR')
+                    db.execute('INSERT INTO bollinger_phone_notifications VALUES(?,?,?)',(keys[1],state,'2026-10-14T15:40:00+00:00'))
+                with closing(sqlite3.connect(path)) as db, db:
+                    self.assertFalse(claim_notice(db,keys,'2026-10-14T15:41:00+00:00'))
+                with closing(sqlite3.connect(path)) as db, db:
+                    other=candle_keys('v1|chat|ALPACA|iex|MU','2026-10-14T15:45:00+00:00','INFERIOR')
+                    self.assertTrue(claim_notice(db,other,'2026-10-14T15:46:00+00:00'))
+
+    def test_delivery_failure_survives_no_signal_cycles_until_success(self):
+        from bollinger_phone_worker import delivery_status
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'market.db'
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('CREATE TABLE bollinger_phone_notifications(event_key TEXT PRIMARY KEY,state TEXT,attempted_at TEXT)')
+                db.execute('INSERT INTO bollinger_phone_notifications VALUES(?,?,?)',('old','ENVIO_NO_CONFIRMADO','2026-10-14T15:40:00+00:00'))
+            self.assertEqual(delivery_status(path)['last_delivery_state'],'ENVIO_NO_CONFIRMADO')
+            with closing(sqlite3.connect(path)) as db, db:
+                db.execute('INSERT INTO bollinger_phone_notifications VALUES(?,?,?)',('new','ENVIADO','2026-10-14T15:41:00+00:00'))
+            self.assertEqual(delivery_status(path)['last_delivery_state'],'ENVIADO')
+
     def test_status_reader_lock_retries_without_stopping_monitor(self):
         from bollinger_phone_worker import write_status
         import json
@@ -151,6 +198,7 @@ class BollingerPhoneTests(unittest.TestCase):
                     patch("bollinger_phone_worker.connection", return_value={"chat_id": "1"}), \
                     patch("bollinger_phone_worker.MarketSessionRepository") as calendar, \
                     patch("bollinger_phone_worker.MarketBarStore") as store, \
+                    patch("bollinger_phone_worker._minute_reference_ready", return_value=True), \
                     patch("manual_trade_links.signal_link", return_value="https://jj.example/?operar=AAPL&lado=CALL"), \
                     patch("bollinger_phone_worker.aggregate_minute_bars", return_value=self.frame()), \
                     patch("bollinger_phone_worker.prepare_market_frame", return_value=self.frame()):
@@ -161,14 +209,18 @@ class BollingerPhoneTests(unittest.TestCase):
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 1)
                 self.assertEqual(tick(database, as_of=now, sender=sender)["sent"], 0)
                 sender.assert_called_once()
-                self.assertEqual(sender.call_args.kwargs['reply_markup']['inline_keyboard'][0][0]['url'],
-                                 'https://jj.example/?operar=AAPL&lado=CALL')
+                self.assertEqual(sender.call_args.kwargs, {})  # Detection only: no buttons.
+                self.assertEqual(len(sender.call_args.args[0].splitlines()),4)
                 with patch("bollinger_phone_worker.enabled", return_value=False), patch("bollinger_phone_worker.prepare_market_frame", return_value=self.frame("INFERIOR")):
                     result = tick(database, as_of=now, sender=sender)
                 self.assertEqual(result["state"], "VIGILANDO_SIN_AVISOS")
                 sender.assert_called_once()
                 with sqlite3.connect(database) as db:
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM bollinger_live_events").fetchone()[0], 2)
+                    import json
+                    events=[json.loads(row[0]) for row in db.execute('SELECT payload_json FROM bollinger_live_events')]
+                    self.assertTrue(all(event['band_expansion']['required_pct']==1 for event in events))
+                    self.assertTrue(all(event['band_expansion']['minimum_pct']>=1 for event in events))
                     timing=db.execute('SELECT send_started_at,telegram_message_at,state FROM bollinger_notice_timing').fetchall()
                     self.assertEqual(timing,[(now.isoformat(),now.isoformat(),'ENVIADO')])
                 db.close()

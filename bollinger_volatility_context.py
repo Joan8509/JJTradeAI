@@ -9,6 +9,7 @@ import pandas as pd
 
 from bollinger_phone_worker import bands_at_open
 from live_market import aggregate_minute_bars
+from bounded_market_history import load_history
 from scripts.study_bollinger_timeframes import regular_frame
 
 
@@ -137,13 +138,12 @@ def _live_history(database,symbol,provider,feed,available_stamp):
     # Minute time labels are their start. Require completion AND receipt by
     # the signal time, excluding later revisions/backfills from this snapshot.
     uri='file:'+Path(database).resolve().as_posix()+'?mode=ro'
-    with closing(sqlite3.connect(uri,uri=True,timeout=5)) as db:
+    with closing(sqlite3.connect(uri,uri=True,timeout=2)) as db:
         sessions={key:(pd.Timestamp(op),pd.Timestamp(close)) for key,op,close in db.execute(
             'SELECT session_date,opens_at,closes_at FROM market_sessions')}
-        bars=pd.read_sql_query('SELECT timestamp AS date,open,high,low,close,volume FROM minute_bars '
-            'WHERE symbol=? AND provider=? AND feed=? AND timestamp>=? AND timestamp<=? AND received_at<=? ORDER BY timestamp',db,
-            params=(symbol,provider,feed,(available-pd.Timedelta(days=480)).isoformat(),
-                    (available-pd.Timedelta(minutes=1)).isoformat(),available.isoformat()))
+    bars=load_history(database,symbol=symbol,provider=provider,feed=feed,
+        start=available-pd.Timedelta(days=480),end=available-pd.Timedelta(minutes=1),
+        received_by=available)
     return HigherVolatilityHistory(bars,sessions)
 
 

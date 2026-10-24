@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer"><title>JJTrade · Demo visual</title>
+<link rel="stylesheet" href="style.css"><link rel="stylesheet" href="demo.css">
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script><script src="demo.js" defer></script></head>
+<body><main><header><span class="brand">JJTrade AI</span><span class="mode">DEMO · SIN ÓRDENES</span></header>
+<h1>Mi operación</h1>
+<p id="status" role="status">Solo prueba visual. Todos los precios, contratos y resultados son ficticios. No hay compras ni ventas.</p>
+<div class="tabs"><button id="tab-setup" class="secondary" type="button">1 · Preparar</button><button id="tab-monitor" type="button">2 · Seguimiento</button></div>
+<section id="setup" hidden><h2>Preparar compra · ejemplo</h2>
+<p>AMZN · Salida superior → CALL</p><p>Rango de prima del ejemplo: $1.50–$2.50</p>
+<p>Contrato ITM de ejemplo · Strike $100 · Acción $104<br>Vencimiento ilustrativo · Bid $1.95 / Ask $2.00 · Spread $0.05</p>
+<label for="quantity">Cantidad de contratos · solo ejemplo</label><select id="quantity"><option>1</option><option>2</option><option selected>3</option><option>5</option><option>10</option></select>
+<label for="profit">Objetivo de ganancia</label><select id="profit"><option value="10">10%</option><option value="20">20%</option><option value="35" selected>35%</option><option value="100">100%</option><option value="MANUAL">Manual</option></select>
+<p id="cost"></p><p>Stop loss de ejemplo: 10% · Cierre manual disponible</p>
+<button disabled type="button">Ejecutar compra · deshabilitado en esta demo</button>
+<button id="preview" class="secondary" type="button">Ver ejemplo de seguimiento</button></section>
+<div id="monitor"><section id="selection"><h2>AMZN · CALL · contrato ficticio ITM</h2><p id="summary"></p><p id="fill">Posición de ejemplo. No corresponde a una ejecución de tu cuenta.</p></section>
+<section class="metrics" aria-label="Ejemplo de seguimiento">
+<article><span>Prima media del ejemplo</span><strong id="average">$2.00</strong></article>
+<article><span>Bid ilustrativo</span><strong id="bid">$2.10</strong></article>
+<article><span>Ganancia / pérdida bruta ficticia</span><strong id="pnl" class="positive">$30.00</strong><small id="pct">5.00%</small></article>
+<article><span>Resultado neto estimado</span><strong>—</strong><small>Costos reales pendientes de verificar</small></article>
+<article><span>Objetivo del ejemplo</span><strong id="target">$2.70</strong></article>
+<article><span>Umbral del stop</span><strong id="stop">$1.60</strong></article></section>
+<p class="muted">Movimiento generado en tu teléfono para mostrar la interfaz. No es una cotización en vivo.</p>
+<section class="chart"><h2>Bid del contrato · gráfico ficticio</h2><canvas id="chart" role="img" aria-label="Demostración del gráfico de Bid con objetivo y stop"></canvas>
+<p class="muted">En operación, el resultado se calcula con los fills y cotizaciones vigentes. El stop no garantiza un precio de salida.</p></section>
+<section><h2>Gestionar operación</h2><button disabled type="button">Cerrar posición · deshabilitado en esta demo</button>
+<button disabled class="secondary" type="button">Cancelar remanente · deshabilitado</button><button id="restart" class="secondary" type="button">Reiniciar animación de ejemplo</button></section></div>
+<footer>DEMO VISUAL · Sin conexión a Alpaca ni Schwab. No usa tu cuenta, historial o deduplicación. Las órdenes reales y simuladas están deshabilitadas en esta vista.</footer>
+</main></body></html>

@@ -14,6 +14,7 @@ from bollinger_strategy_study import OUTPUT
 from market_calendar import MarketSessionRepository
 from market_store import DEFAULT_MARKET_DATABASE
 from watchlist_config import load_watchlist
+from radar_health import fast_feed_health
 
 
 def authorized(header, key):
@@ -40,12 +41,15 @@ def snapshot(database=DEFAULT_MARKET_DATABASE, *, as_of=None, status_path=STATUS
                 if row.get("version") == STRATEGY_VERSION and row["symbol"] in configured:
                     events.append({key: row.get(key) for key in ("symbol", "side", "price", "detected_at")})
     healthy = False
+    feed_health = fast_feed_health(database, now=now)
     try:
         radar = json.loads(Path(status_path).read_text(encoding="utf-8"))
         heartbeat = datetime.fromisoformat(radar["heartbeat"])
         healthy = timedelta(0) <= now-heartbeat <= timedelta(seconds=30) and radar.get("state") in {"VIGILANDO", "VIGILANDO_SIN_AVISOS", "FUERA_DE_SESION"}
     except (OSError, ValueError, KeyError):
         pass
+    if market_open and feed_health['state'] in {'REVISAR_RELOJ', 'HEARTBEAT_FUTURO'}:
+        healthy = False
     study = None
     try:
         report = json.loads(Path(study_path).read_text(encoding="utf-8"))
@@ -54,7 +58,7 @@ def snapshot(database=DEFAULT_MARKET_DATABASE, *, as_of=None, status_path=STATUS
     except (OSError, ValueError, KeyError):
         pass
     return {"schema": "jjtrade-bollinger-v1", "generated_at": now.isoformat(), "version": STRATEGY_VERSION,
-            "market_open": market_open, "radar_healthy": healthy, "configured": configured,
+            "market_open": market_open, "radar_healthy": healthy, "fast_feed_health": feed_health, "configured": configured,
             "current": states if healthy else [], "events": events, "study": study}
 
 

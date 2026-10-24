@@ -16,6 +16,8 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
     """Usa la API online de SQLite, verifica la copia y aplica retención segura."""
     if retention <= 0:
         raise ValueError("La retención debe ser mayor que cero.")
+    from sqlite_runtime_guard import require_safe_wal_runtime
+    require_safe_wal_runtime(source)
     source_path = Path(source).resolve()
     if not source_path.is_file():
         raise ValueError(f"No existe la base SQLite: {source_path}")
@@ -27,9 +29,8 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
     source_connection = sqlite3.connect(source_path)
     destination_connection = sqlite3.connect(partial)
     try:
-        source_check = source_connection.execute("PRAGMA quick_check").fetchone()[0]
-        if source_check != "ok":
-            raise ValueError(f"La base origen no supera quick_check: {source_check}")
+        # The online API produces a consistent snapshot. Check that complete
+        # snapshot below; do not hold a full integrity scan on the live source.
         source_connection.backup(destination_connection)
         destination_connection.commit()
     finally:
@@ -37,6 +38,11 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
         source_connection.close()
     check_connection = sqlite3.connect(partial)
     try:
+        # A source in WAL mode can leave that mode in the copied header. Make
+        # the independent artifact portable before hashing/archiving it: no
+        # unshipped sidecar files and safe review on the PC's older runtime.
+        if check_connection.execute('PRAGMA journal_mode=DELETE').fetchone()[0] != 'delete':
+            raise ValueError('El backup no pudo quedar independiente en modo DELETE.')
         backup_check = check_connection.execute("PRAGMA quick_check").fetchone()[0]
     finally:
         check_connection.close()
@@ -52,6 +58,7 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
         "size_bytes": destination.stat().st_size,
         "sha256": digest,
         "integrity": "ok",
+        "journal_mode": "delete",
     }
     manifest_path = destination.with_suffix(".json")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

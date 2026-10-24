@@ -918,6 +918,19 @@ def _stored_bool(value: Any) -> bool | None:
     return None if value is None else bool(value)
 
 
+def monitor_scanner_shutdown(supervisor, finished, stop_file, owner_token, realtime_worker=None):
+    """Stop a failed ingest even on a quiet socket, so task supervision can recover."""
+    while not finished.wait(1.0):
+        if realtime_worker is not None and realtime_worker.failed.is_set():
+            print("Receptor rapido fallido; salida cooperativa para recuperacion supervisada.")
+            supervisor.stop()
+            return
+        if consume_stop_request(stop_file, owner_token=owner_token):
+            print("Parada cooperativa solicitada.")
+            supervisor.stop()
+            return
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", default=DEFAULT_SYMBOLS_TEXT, help="Símbolos separados por coma.")
@@ -962,6 +975,7 @@ def main() -> int:
     preflight = run_live_preflight(
         symbols=tuple(symbols), benchmarks=benchmarks, days=args.days,
         database=args.database, option_policy=args.option_policy,
+        integrity_verified_by_backup=not (args.preflight_only or args.no_startup_backup),
     )
     if any(item["name"] == "database" and item["status"] == "OK" for item in preflight["checks"]):
         preflight["run_id"] = record_live_preflight(args.database, preflight)
@@ -989,6 +1003,7 @@ def main() -> int:
         visual_backup = create_visual_evidence_backup(
             backup["backup_path"],
             DEFAULT_VISUAL_EVIDENCE_DIRECTORY,
+            verified_backup=backup,
         )
         print(
             "Backup visual verificado: "
@@ -1061,8 +1076,11 @@ def main() -> int:
             if args.data_only:
                 if realtime_worker is None:
                     continuity.ingest_live_bar(bar)
-                minute_bars = store.load_frame(symbol=bar.symbol, provider="ALPACA", feed=config.feed, end=bar.timestamp)
-                preview = evaluate_live_bollinger_preview(minute_bars, symbol=bar.symbol, as_of=bar.timestamp)
+                # Only nineteen official closes plus the observed partial close
+                # contribute to this display. Do not rebuild seven days of
+                # Pandas/Arrow frames in the shared trade interpreter per bar.
+                from indexed_bollinger_preview import preview_for_bar
+                preview = preview_for_bar(args.database, bar, feed=config.feed)
                 LiveBollingerPreviewRepository(args.database).save(preview)
                 return
             result = scanner.on_bar(bar,already_persisted=realtime_worker is not None)
@@ -1136,14 +1154,9 @@ def main() -> int:
     )
     monitor_finished = Event()
 
-    def monitor_stop_request() -> None:
-        while not monitor_finished.wait(1.0):
-            if consume_stop_request(args.stop_file, owner_token=lease.token):
-                print("Parada cooperativa solicitada.")
-                supervisor.stop()
-                return
-
-    stop_monitor = Thread(target=monitor_stop_request, name="scanner-stop-monitor", daemon=True)
+    stop_monitor = Thread(target=monitor_scanner_shutdown,
+                          args=(supervisor, monitor_finished, args.stop_file, lease.token, realtime_worker),
+                          name="scanner-stop-monitor", daemon=True)
     stop_monitor.start()
     if args.max_runtime_minutes is not None:
         def stop_after_deadline() -> None:
@@ -1167,7 +1180,7 @@ def main() -> int:
             realtime_worker.close()
         Path(args.stop_file).unlink(missing_ok=True)
         lease.release()
-    return 0
+    return 1 if realtime_worker is not None and realtime_worker.failed.is_set() else 0
 
 
 if __name__ == "__main__":

@@ -134,6 +134,14 @@ def build_report(database=DEFAULT_MARKET_DATABASE, *, as_of=None, days=30):
         exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='bollinger_live_events'").fetchone()
         live = [dict(json.loads(row[0]), origin="EN_VIVO") for row in db.execute("SELECT payload_json FROM bollinger_live_events WHERE detected_at>=? AND detected_at<=?", ((now-timedelta(days=days)).isoformat(),now.isoformat()))] if exists else []
     allowed = set(load_watchlist()["symbols"])
+    # Legacy ET/UTC rows may describe the same event. Keep the first actual
+    # observation, without deleting the original private audit records.
+    unique_live = {}
+    for event in sorted(live, key=lambda e: pd.Timestamp(e['detected_at'])):
+        identity = (event.get('version'), event['symbol'], event['provider'], event['feed'],
+                    pd.Timestamp(event['candle']).tz_convert('UTC'), event['side'])
+        unique_live.setdefault(identity, event)
+    live = list(unique_live.values())
     store = MarketBarStore(database)
     observations, event_count = [], 0
     for symbol, provider, feed in sources:

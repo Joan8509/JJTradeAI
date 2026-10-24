@@ -14,6 +14,7 @@ __pycache__/
 credentials*
 *credential*
 config/option_policy.json
+config/schwab_automation.json
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -24,6 +25,7 @@ exports/backups/
 exports/*.lock
 exports/*.stop
 exports/*.log
+exports/fast_ingest_failure.json
 exports/tc2000_cases/case_intake*.csv
 exports/tc2000_cases/package_inventory.csv
 exports/tc2000_cases/*.txt
@@ -56,3 +58,11 @@ exports/bollinger_playback/filters_*/report.json
 
 # Private user execution reviews
 exports/trade_review/
+
+# DPAPI configuration, service gates and local task validation receipts
+exports/private_runtime/
+exports/vps_transfer/
+
+exports/runtime_candidates/
+
+exports/sqlite_runtime/

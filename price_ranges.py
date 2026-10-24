@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,37 @@ from live_market import normalize_minute_bars
 
 
 DEFAULT_OPTION_RANGES_PATH = Path(__file__).resolve().parent / "config" / "option_price_ranges.csv"
+
+
+def load_optimal_option_premiums(path=DEFAULT_OPTION_RANGES_PATH):
+    """Approved entry intervals in quoted USD; saved amounts are cents (divide by100).
+
+    Keep the original table intact. Missing, duplicate or malformed rows block
+    selection rather than falling back to minimum/maximum or another company.
+    """
+    result = {}
+    with Path(path).open(encoding="utf-8", newline="") as source:
+        for row in csv.DictReader(source, delimiter=";"):
+            ticker = str(row.get("ticker", "")).strip().upper()
+            try:
+                low = Decimal(row["optimal_low"]) / 100
+                high = Decimal(row["optimal_high"]) / 100
+            except (KeyError, TypeError, InvalidOperation):
+                raise ValueError("OPTIMAL_PREMIUM_RANGE_INVALID") from None
+            if (not ticker or ticker in result or not low.is_finite()
+                    or not high.is_finite() or not 0 < low <= high):
+                raise ValueError("OPTIMAL_PREMIUM_RANGE_INVALID")
+            result[ticker] = (low, high)
+    if not result:
+        raise ValueError("OPTIMAL_PREMIUM_RANGE_INVALID")
+    return result
+
+
+def optimal_option_premium(symbol, path=DEFAULT_OPTION_RANGES_PATH):
+    try:
+        return load_optimal_option_premiums(path)[symbol.strip().upper()]
+    except KeyError:
+        raise ValueError("OPTIMAL_PREMIUM_RANGE_MISSING") from None
 
 
 def load_option_price_ranges(
@@ -44,6 +76,8 @@ def calculate_price_range(
     level_lookback: int = 20,
 ) -> dict[str, Any] | None:
     """Resume precio, rango ATR y niveles recientes; no proyecta garantías."""
+    if len(minute_bars.index) == 0:
+        return None
     bars = normalize_minute_bars(minute_bars)
     if bars.empty:
         return None

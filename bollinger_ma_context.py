@@ -2,10 +2,11 @@
 from functools import lru_cache
 import math
 import sqlite3
+from contextlib import closing
 
 import pandas as pd
-from live_market import aggregate_minute_bars
-from market_store import MarketBarStore
+from live_market import aggregate_minute_bars, normalize_minute_bars
+from bounded_market_history import load_history
 from moving_average_rules import pair_history, level_role, hour_confirmation, touch_episodes
 from bollinger_price_levels import price_levels, price_levels_text
 
@@ -106,17 +107,18 @@ def context_from_aggregates(datasets, *, price, side, available_at, ma_type='SMA
 def _history(database,symbol,provider,feed,hour_key):
     available=pd.Timestamp(hour_key)
     # Only closed aggregate context is cached; signal price is never cached.
-    bars=MarketBarStore(database).load_frame(symbol=symbol,provider=provider,feed=feed,
+    bars=load_history(database,symbol=symbol,provider=provider,feed=feed,
         start=(available-pd.Timedelta(days=480)).to_pydatetime(),end=available.to_pydatetime())
     if bars.empty:
         return None
+    bars=normalize_minute_bars(bars)
     data={tf:aggregate_minute_bars(bars,tf) for tf in ('1H','1D')}
     local=pd.to_datetime(bars.date,utc=True).dt.tz_convert('America/New_York')
     minute_of_day=local.dt.hour*60+local.dt.minute
     regular=bars[(minute_of_day>=570) & (minute_of_day<960)].copy()
     regular['session_date']=pd.to_datetime(regular.date,utc=True).dt.tz_convert('America/New_York').dt.date.astype(str)
     data['1D'].attrs['last_minute_by_session']={key:pd.Timestamp(value).isoformat() for key,value in regular.groupby('session_date').date.max().items()}
-    with sqlite3.connect(database) as db:
+    with closing(sqlite3.connect(database, timeout=2)) as db:
         sessions=db.execute('SELECT session_date,closes_at FROM market_sessions').fetchall()
     data['1D'].attrs['session_closes']=dict(sessions)
     previous=[date for date,_ in sessions if date<available.tz_convert('America/New_York').date().isoformat()]

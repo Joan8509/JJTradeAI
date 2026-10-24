@@ -4,12 +4,16 @@ No broker orders. Prices follow Alpaca close-eligible sale conditions. The
 minute history stays canonical; an intraminute observation never overwrites it.
 """
 from collections import OrderedDict
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import math
+import os
+from pathlib import Path
 from queue import Empty, Full, Queue
 import sqlite3
-from threading import Event, Thread
+from threading import Event, Thread, Lock
 import time
 from zoneinfo import ZoneInfo
 
@@ -17,13 +21,56 @@ import pandas as pd
 
 from alpaca_market_data import AlpacaStockBarStream
 from bollinger_phone_worker import bands_at_open, detect_values, STRATEGY_VERSION
-from live_market import aggregate_minute_bars
+from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT, expansion_evidence
 from market_calendar import MarketSessionRepository
 from market_store import MarketBarStore
+from bollinger_reference_scope import (REGULAR, active_reference_scope, required_periods)
 
 UTC = timezone.utc
 NY = ZoneInfo('America/New_York')
 MAX_TRADE_AGE = timedelta(seconds=3)
+MAX_PENDING_AUDIT = 8192
+ROUTINE_FLUSH_SECONDS = .5
+
+
+def sqlite_busy(error):
+    code = getattr(error, 'sqlite_errorcode', None)
+    return isinstance(code, int) and code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+
+
+def record_ingest_revision(database):
+    """Fixed local receipt proving which implementation a worker loaded."""
+    path = Path(database).resolve().parent/'trade_review/ingest_runtime/loaded.json'
+    temporary = path.with_suffix('.'+str(os.getpid())+'.tmp')
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps({'utc': datetime.now(UTC).isoformat(),
+            'pid': os.getpid(), 'revision': 'sqlite_wal_publisher_v5',
+            'source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'minimum_band_expansion_pct': MINIMUM_BAND_EXPANSION_PCT,
+            'expansion_source_sha256': hashlib.sha256(Path(__file__).with_name('bollinger_expansion.py').read_bytes()).hexdigest(),
+            'detector_source_sha256': hashlib.sha256(Path(__file__).with_name('bollinger_phone_worker.py').read_bytes()).hexdigest(),
+            'sqlite_version': sqlite3.sqlite_version}), encoding='utf-8')
+        temporary.replace(path)
+    except OSError:
+        pass  # Receipt contention must not stop market reception.
+
+
+def record_ingest_failure(database, stage, error):
+    """Allowlisted failure metadata; never raw exceptions, trades or credentials."""
+    result = {'utc': datetime.now(UTC).isoformat(), 'pid': os.getpid(),
+              'stage': stage, 'error_type': type(error).__name__}
+    code = getattr(error, 'sqlite_errorcode', None)
+    if isinstance(code, int):
+        result['sqlite_errorcode'] = code
+    path = Path(database).resolve().parent/'fast_ingest_failure.json'
+    temporary = path.with_suffix('.'+str(os.getpid())+'.tmp')
+    try:
+        temporary.write_text(json.dumps(result), encoding='utf-8')
+        temporary.replace(path)
+    except OSError:
+        pass
+
 # Alpaca's Stock Minute Bars article: exclusions from open/close price.
 EXCLUDED_CONDITIONS = frozenset('479CGHIMNPQRTUVZ')
 REGULAR_MODIFIERS = frozenset(('@', ' ', 'F', 'E', 'X', 'Y', 'L', 'O', '5', '6'))
@@ -46,6 +93,8 @@ def eligible_trade(message):
 
 class TickRepository:
     def __init__(self, database):
+        from sqlite_runtime_guard import require_safe_wal_runtime
+        require_safe_wal_runtime(database)
         self.database = str(database)
         with self.connect() as db:
             db.executescript('''
@@ -66,12 +115,12 @@ class TickRepository:
             db.execute('DELETE FROM bollinger_tick_audit WHERE received_at < ?',
                        ((datetime.now(UTC)-timedelta(days=7)).isoformat(),))
 
-    def connect(self):
+    def connect(self, *, timeout=5):
         # Explicit close, including Windows test cleanup.
         from contextlib import contextmanager
         @contextmanager
         def opened():
-            db = sqlite3.connect(self.database, timeout=5)
+            db = sqlite3.connect(self.database, timeout=timeout)
             try:
                 with db:
                     yield db
@@ -79,8 +128,9 @@ class TickRepository:
                 db.close()
         return opened()
 
-    def flush(self, snapshots, audit, *, state, feed, symbols, now):
-        with self.connect() as db:
+    def flush(self, snapshots, audit, *, state, feed, symbols, now, connection=None):
+        transaction = self.connect(timeout=.025) if connection is None else connection
+        with transaction as db:
             db.execute('INSERT INTO bollinger_tick_runtime VALUES(1,?,?,?,?) '
                        'ON CONFLICT(id) DO UPDATE SET state=excluded.state,heartbeat=excluded.heartbeat,'
                        'feed=excluded.feed,symbols_json=excluded.symbols_json',
@@ -96,8 +146,9 @@ class TickRepository:
 
 class TickGeometry:
     """O(20) geometry per eligible trade; history loads only on candle changes."""
-    def __init__(self, database, feed, *, now=None):
+    def __init__(self, database, feed, *, now=None, reference_scope=None):
         self.database, self.feed = database, feed
+        self.reference_scope = reference_scope or active_reference_scope()
         self.now = now or (lambda: datetime.now(UTC))
         self.store = MarketBarStore(database)
         self.calendar = MarketSessionRepository(database)
@@ -113,35 +164,46 @@ class TickGeometry:
         self.states.clear()
 
     def _history(self, symbol, candle, now):
-        bars = self.store.load_frame(symbol=symbol, provider='ALPACA', feed=self.feed,
-                                    start=candle-timedelta(days=7), end=candle-timedelta(minutes=1))
-        if bars.empty:
-            return None
-        closed = aggregate_minute_bars(bars, '15m')
-        closed = closed[closed.date < pd.Timestamp(candle)].tail(20)
-        if len(closed) != 20:
-            return None
-        # Require the last official closing minute. A delayed prior candle
-        # must not be used as a completed Bollinger reference.
-        previous_start = closed.iloc[-1].date.to_pydatetime()
-        previous_session = self.calendar.session(previous_start.astimezone(NY).date())
-        if previous_session is None:
-            return None
-        expected = min(previous_start+timedelta(minutes=15), previous_session.closes_at)-timedelta(minutes=1)
-        if pd.Timestamp(expected) not in set(pd.to_datetime(bars.date, utc=True)):
-            return None
-        if candle > self.session.opens_at and previous_start != candle-timedelta(minutes=15):
-            return None
-        # At the session open require the previous *official* session, not an
-        # arbitrary older day with available data.
-        if candle == self.session.opens_at:
-            with sqlite3.connect(self.database) as db:
+        # Only the last close of each required official period contributes to
+        # Bollinger. Avoid normalizing/resampling seven days of minute rows on
+        # the shared trade thread whenever a symbol starts a new candle.
+        uri = Path(self.database).resolve().as_uri()+'?mode=ro'
+        started = time.monotonic()
+        with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+            db.execute('PRAGMA query_only=ON')
+            db.set_progress_handler(lambda: time.monotonic()-started > 2, 1000)
+            sessions = db.execute(
+                'SELECT opens_at,closes_at FROM market_sessions WHERE session_date>=? '
+                'AND session_date<=? ORDER BY session_date',
+                ((candle.astimezone(NY).date()-timedelta(days=7)).isoformat(),
+                 candle.astimezone(NY).date().isoformat()),
+            ).fetchall()
+            required = required_periods(sessions, candle, scope=self.reference_scope)
+            if not required:
+                return None
+            previous_start = required[-1][0]
+            if candle > self.session.opens_at and previous_start != candle-timedelta(minutes=15):
+                return None
+            if self.reference_scope == REGULAR and candle == self.session.opens_at:
                 row = db.execute('SELECT MAX(session_date) FROM market_sessions WHERE session_date < ?',
                                  (candle.astimezone(NY).date().isoformat(),)).fetchone()
-            db.close()
-            if not row or row[0] != previous_start.astimezone(NY).date().isoformat():
-                return None
-        return closed.close.astype(float).tolist()
+                if not row or row[0] != previous_start.astimezone(NY).date().isoformat():
+                    return None
+            closes = []
+            for period, end in required:
+                # Indexed seeks release only twenty prices, never substitute
+                # an older period when this one has no official minute bars.
+                row = db.execute('SELECT timestamp,close FROM minute_bars '
+                    'WHERE provider=? AND feed=? AND symbol=? AND timestamp>=? AND timestamp<=? '
+                    'ORDER BY timestamp DESC LIMIT 1',
+                    ('ALPACA', self.feed, symbol, period.isoformat(),
+                     (end-timedelta(minutes=1)).isoformat())).fetchone()
+                if row is None:
+                    return None
+                if period == previous_start and pd.Timestamp(row[0]) != pd.Timestamp(end-timedelta(minutes=1)):
+                    return None
+                closes.append(float(row[1]))
+        return closes
 
     def observe(self, message, received):
         symbol = str(message.get('S', '')).upper()
@@ -213,6 +275,7 @@ class TickGeometry:
                     state['opening'] = float(first.iloc[0].open)
                 state['open_retry_at'] = now+timedelta(seconds=1)
             signal = None
+            geometry = None
             price = float(message['p'])
             reason = 'READY_NO_EXIT'
             if state['quarantined']:
@@ -227,19 +290,129 @@ class TickGeometry:
                 side = detect_values(prior[-1], prev_upper, prev_lower, sum(prior)/20,
                     price, upper, lower, (sum(prior[1:])+price)/20,
                     opening=state['opening'], opening_upper=opening_upper, opening_lower=opening_lower)
+                geometry = {'upper': upper, 'lower': lower,
+                    'previous_upper': prev_upper, 'previous_lower': prev_lower,
+                    'mid': (sum(prior[1:])+price)/20, 'previous_mid': sum(prior)/20,
+                    'opening_upper': opening_upper, 'opening_lower': opening_lower,
+                    'opening': state['opening'], 'price': price, 'side': side}
                 if side:
                     exposure = (price-upper if side == 'SUPERIOR' else lower-price)/(upper-lower)*100
                     signal = {'side': side, 'price': price, 'candle': candle.isoformat(),
+                              'band_expansion': expansion_evidence(upper, lower, prev_upper, prev_lower),
                               'exposure_pct_bandwidth': exposure, 'small_exposure': exposure < 1}
                     reason = 'EXIT'
+            # History/SQLite work can consume time after the first age check.
+            # Never publish an EXIT that became stale during that work.
+            checked = self.now()
+            if not timedelta(0) <= checked-stamp <= MAX_TRADE_AGE:
+                return None, 'DISCONNECTED_OR_STALE'
             return {'symbol': symbol, 'provider': 'ALPACA', 'feed': self.feed,
                     'source_kind': 'TRADE', 'source_timestamp': stamp.isoformat(),
-                    'received_at': received.isoformat(), 'checked_at': now.isoformat(),
+                    'received_at': received.isoformat(), 'checked_at': checked.isoformat(),
                     'opening': state['opening'], 'version': STRATEGY_VERSION,
+                    'reference_scope': self.reference_scope,
                     'trade_id': message['i'], 'trade_timestamp_raw': message['t'],
-                    'signal': signal, 'reason': reason}, reason
+                    'signal': signal, 'reason': reason, 'geometry': geometry}, reason
         except (KeyError, ValueError, TypeError, OverflowError):
             return None, 'INVALID_TRADE'
+
+
+class TickPublisher:
+    """Single bounded writer. Disk commit latency cannot hold trade evaluation.
+
+    Each retry preserves every audit and the newest projection per symbol.
+    Heartbeat timestamps come from the evaluator, never from writer progress.
+    """
+    def __init__(self, repository, feed, symbols, failed):
+        self.repository,self.feed,self.symbols,self.failed=repository,feed,symbols,failed
+        self.lock=Lock();self.wake=Event();self.stopping=Event()
+        self.snapshots={};self.audit=[];self.inflight=0
+        self.state='DESCONECTADO';self.now=datetime.now(UTC)
+        self.fatal_batch=None
+        self.thread=Thread(target=self._run,name='tick-publisher',daemon=True)
+        self.thread.start()
+
+    def pending(self):
+        with self.lock:return len(self.audit)+self.inflight
+
+    def submit(self,snapshots,audit,*,state,now,final=False):
+        with self.lock:
+            if not final and len(audit)+len(self.audit)+self.inflight>MAX_PENDING_AUDIT:
+                raise BufferError('Pending trade audit limit exceeded')
+            self.snapshots.update(snapshots);self.audit.extend(audit)
+            self.state,self.now=state,now
+        self.wake.set()
+
+    def _run(self):
+        connection=None
+        try:
+            connection=sqlite3.connect(self.repository.database,timeout=.025)
+            connection.execute('PRAGMA synchronous=FULL')
+            self._publish_loop(connection)
+        except Exception as error:
+            record_ingest_failure(self.repository.database,'TICK_PUBLICATION_FAILED',error)
+            self.failed.set()
+        finally:
+            if connection is not None:connection.close()
+
+    def _publish_loop(self, connection):
+        last_prune=time.monotonic()
+        batch=None
+        while True:
+            self.wake.wait(.05)
+            if batch is None:
+                with self.lock:
+                    if not self.wake.is_set():
+                        if self.stopping.is_set():return
+                        continue
+                    self.wake.clear()
+                    batch=(self.snapshots,self.audit,self.state,self.now)
+                    self.snapshots,self.audit={},[]
+                    self.inflight=len(batch[1])
+            snapshots,audit,state,now=batch
+            try:
+                self.repository.flush(snapshots,audit,state=state,feed=self.feed,symbols=self.symbols,now=now,connection=connection)
+            except sqlite3.OperationalError as error:
+                if sqlite_busy(error):
+                    # Merge pending retractions before retrying a rolled-back
+                    # batch. An old EXIT must not replace a newer neutral state.
+                    with self.lock:
+                        snapshots.update(self.snapshots);audit.extend(self.audit)
+                        self.snapshots,self.audit={},[]
+                        batch=(snapshots,audit,self.state,self.now)
+                        self.inflight=len(audit)
+                        self.wake.clear()
+                    time.sleep(.05)
+                    continue
+                record_ingest_failure(self.repository.database,'TICK_PUBLICATION_FAILED',error)
+                self.failed.set()
+                self.fatal_batch=batch
+                return
+            except Exception as error:
+                record_ingest_failure(self.repository.database,'TICK_PUBLICATION_FAILED',error)
+                self.failed.set()
+                self.fatal_batch=batch
+                return
+            with self.lock:self.inflight=0
+            batch=None
+            # Retention is disk maintenance, never work on the trade evaluator.
+            if time.monotonic()-last_prune>=60:
+                try:
+                    with connection as db:
+                        db.execute('DELETE FROM bollinger_tick_audit WHERE id IN '
+                            '(SELECT id FROM bollinger_tick_audit WHERE id <= '
+                            '(SELECT MAX(id)-200000 FROM bollinger_tick_audit) ORDER BY id LIMIT 2000)')
+                except sqlite3.OperationalError as error:
+                    if not sqlite_busy(error):
+                        record_ingest_failure(self.repository.database,'TICK_RETENTION_FAILED',error)
+                        self.failed.set()
+                last_prune=time.monotonic()
+
+    def close(self):
+        self.stopping.set();self.wake.set();self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            self.failed.set()
+            record_ingest_failure(self.repository.database,'TICK_PUBLICATION_SHUTDOWN_TIMEOUT',TimeoutError())
 
 
 class RealtimeBollingerWorker:
@@ -250,10 +423,12 @@ class RealtimeBollingerWorker:
         self.feed, self.symbols = feed, tuple(symbols)
         self.queue, self.analysis = Queue(maxsize=4096), Queue(maxsize=2048)
         self.finished, self.failed = Event(), Event()
+        self.publisher=TickPublisher(self.repository,feed,self.symbols,self.failed)
         self.state = 'DESCONECTADO'
         self.last_error = None
         self.threads = [Thread(target=self._run, name='bollinger-trades', daemon=True),
                         Thread(target=self._analyze, name='bar-analysis', daemon=True)]
+        record_ingest_revision(database)
         for thread in self.threads:
             thread.start()
 
@@ -283,83 +458,120 @@ class RealtimeBollingerWorker:
                 continue
             try:
                 callback(bar)
-            except Exception:
+            except Exception as error:
                 # Existing handle_bar records its own incidents. An unexpected
                 # callback failure must still make this worker unhealthy.
                 self.last_error = 'BAR_ANALYSIS_FAILED'
+                record_ingest_failure(self.repository.database, self.last_error, error)
                 self.failed.set()
             finally:
                 self.analysis.task_done()
 
     def _run(self):
         snapshots, audit = {}, []
+        patterns = {}
+        urgent = False
         last_flush = time.monotonic()
-        last_prune = last_flush
+        deferred = None
         while not self.finished.is_set():
             try:
-                kind, payload, received, callback = self.queue.get(timeout=.05)
+                if deferred is None:
+                    kind, payload, received, callback = self.queue.get(timeout=.05)
+                else:
+                    kind, payload, received, callback = deferred
+                    deferred = None
             except Empty:
                 kind = None
+            completed = 1 if kind is not None else 0
             try:
                 if self.failed.is_set():
                     self.state = 'ERROR'
                     self.geometry.status('ERROR', datetime.now(UTC))
                     snapshots.clear()
+                    patterns.clear()
+                    urgent = True
                 elif kind == 'status':
                     self.state = payload
                     self.geometry.status(payload, received)
                     snapshots.clear()
+                    patterns.clear()
+                    urgent = True
                 elif kind == 'bar':
-                    self.geometry.store.upsert_bar(payload, provider='ALPACA', feed=self.feed)
-                    state=self.geometry.states.get(payload.symbol)
-                    if state:
-                        if payload.timestamp < state['candle']:
-                            state['history']=None
-                            state['retry_at']=datetime.now(UTC)
-                        elif payload.timestamp == state['candle']:
-                            state['opening']=payload.open
-                            state['opening_stamp']=None
-                        # A changed official reference cannot leave an earlier
-                        # tick candidate queued for sending. Reevaluate on price.
-                        snapshots[payload.symbol]={'symbol':payload.symbol,'provider':'ALPACA','feed':self.feed,
-                            'source_kind':'TRADE','source_timestamp':received.isoformat(),
-                            'received_at':received.isoformat(),'signal':None,'reason':'REFERENCE_UPDATED'}
-                    # No analysis or historical network calls on the receive thread.
-                    self.analysis.put_nowait((callback, payload))
+                    bars = [(payload, received, callback)]
+                    # Coalesce only adjacent bars already queued. Never cross a
+                    # trade/status/correction or add a collection delay.
+                    while len(bars) < 64:
+                        try:
+                            item = self.queue.get_nowait()
+                        except Empty:
+                            break
+                        if item[0] != 'bar':
+                            deferred = item
+                            break
+                        bars.append((item[1], item[2], item[3]))
+                        completed += 1
+                    self.geometry.store.upsert_bars([b for b, _, _ in bars], provider='ALPACA', feed=self.feed)
+                    for bar, bar_received, bar_callback in bars:
+                        state=self.geometry.states.get(bar.symbol)
+                        if state:
+                            if bar.timestamp < state['candle']:
+                                state['history']=None
+                                state['retry_at']=datetime.now(UTC)
+                            elif bar.timestamp == state['candle']:
+                                state['opening']=bar.open
+                                state['opening_stamp']=None
+                            snapshots[bar.symbol]={'symbol':bar.symbol,'provider':'ALPACA','feed':self.feed,
+                                'source_kind':'TRADE','source_timestamp':bar_received.isoformat(),
+                                'received_at':bar_received.isoformat(),'signal':None,'reason':'REFERENCE_UPDATED'}
+                            if patterns.pop(bar.symbol, None) is not None:
+                                urgent = True
+                        self.analysis.put_nowait((bar_callback, bar))
                 elif kind == 'trade':
+                    processing_started = datetime.now(UTC)
                     snapshot, reason = self.geometry.observe(payload, received)
                     symbol = str(payload.get('S', '')).upper()
                     if snapshot:
                         snapshots[symbol] = snapshot
+                        signal = snapshot.get('signal')
+                        identity = (signal.get('side'), signal.get('candle')) if signal else None
+                        if identity != patterns.get(symbol):
+                            urgent = True
+                        patterns[symbol] = identity
                     elif payload.get('T') in ('c', 'x'):
                         snapshots[symbol] = {'symbol': symbol, 'provider': 'ALPACA', 'feed': self.feed,
                             'source_kind': 'TRADE', 'source_timestamp': received.isoformat(),
                             'received_at': received.isoformat(), 'signal': None, 'reason': reason}
-                    audit.append((received.isoformat(), symbol, payload.get('t'), reason, json.dumps(payload)))
-                if time.monotonic()-last_flush >= .1 or len(audit) >= 200:
-                    self.repository.flush(snapshots, audit, state=self.state, feed=self.feed,
-                                          symbols=self.symbols, now=datetime.now(UTC))
-                    snapshots.clear()
-                    audit.clear()
-                    last_flush = time.monotonic()
-                    if last_flush-last_prune>=60:
-                        with self.repository.connect() as db:
-                            db.execute('DELETE FROM bollinger_tick_audit WHERE id <= '
-                                       '(SELECT MAX(id)-200000 FROM bollinger_tick_audit)')
-                        last_prune=last_flush
-            except Exception:
+                        patterns.pop(symbol, None)
+                        urgent = True
+                    evidence = dict(payload)
+                    evidence['_jjtrade'] = {'processing_started_at': processing_started.isoformat(),
+                        'processed_at': datetime.now(UTC).isoformat(),
+                        'connected': self.geometry.connected_at is not None,
+                        'geometry': snapshot.get('geometry') if snapshot else None}
+                    audit.append((received.isoformat(), symbol, payload.get('t'), reason, json.dumps(evidence)))
+                if len(audit)+self.publisher.pending() > MAX_PENDING_AUDIT:
+                    raise BufferError('Pending trade audit limit exceeded')
+                flush_at = time.monotonic()
+                if urgent or flush_at-last_flush >= ROUTINE_FLUSH_SECONDS or len(audit) >= 200:
+                    self.publisher.submit(snapshots,audit,state=self.state,now=datetime.now(UTC))
+                    snapshots,audit={},[]
+                    urgent=False
+                    last_flush=time.monotonic()
+            except Exception as error:
                 self.last_error = 'FAST_INGEST_FAILED'
+                if not self.failed.is_set():
+                    record_ingest_failure(self.repository.database, self.last_error, error)
                 self.failed.set()
             finally:
-                if kind is not None:
+                for _ in range(completed):
                     self.queue.task_done()
-        self.repository.flush({}, audit, state='DETENIDO', feed=self.feed,
-                              symbols=self.symbols, now=datetime.now(UTC))
+        self.publisher.submit({},audit,state='DETENIDO',now=datetime.now(UTC),final=True)
 
     def close(self):
         self.finished.set()
         for thread in self.threads:
             thread.join(timeout=5)
+        self.publisher.close()
 
 
 class RealtimeBollingerStream:
@@ -369,6 +581,8 @@ class RealtimeBollingerStream:
         self.stream = AlpacaStockBarStream(config, on_trade_message=worker.trade)
 
     def run(self, symbols, on_bar, *, on_error=None, on_status=None):
+        from bollinger_reference_recovery import ReferenceRecovery
+        recovery=ReferenceRecovery(self.stream.config,self.worker.geometry.store,symbols)
         def status(state):
             self.worker.status(state)
             if on_status:
@@ -380,9 +594,11 @@ class RealtimeBollingerStream:
             if on_error:
                 on_error(failure)
         try:
+            recovery.start()
             self.stream.run(symbols, lambda bar: self.worker.bar(bar, on_bar),
                             on_error=error, on_status=status)
         finally:
+            recovery.close()
             if not self.worker.failed.is_set():
                 status('DESCONECTADO')
 

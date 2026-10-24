@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer"><title>JJTrade · Mi operación</title>
+<link rel="stylesheet" href="style.css"><script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+<script src="app.js" defer></script></head>
+<body><main><header><span class="brand">JJTrade AI</span><span class="mode">SIMULACIÓN LOCAL</span></header>
+<h1>Mi operación</h1><p id="status" role="status" aria-live="polite">Validando la selección…</p>
+<section id="entry-panel" hidden><h2 id="entry-title">Preparar compra simulada</h2><p id="entry-range"></p><p id="entry-reason" role="status"></p>
+<p id="entry-signal" class="muted"></p><p id="entry-contract-status" class="muted"></p>
+<div id="entry-diagnostics" hidden><h3>Contratos observados · solo comparación</h3>
+<p id="entry-diagnostic-summary" class="muted"></p><div id="entry-observed-contracts"></div>
+<p class="muted">El selector muestra también los contratos descartados para revisarlos. «Solo revisión» no habilita compra: se indica qué condición falta.</p></div>
+<button id="entry-current" class="secondary" type="button" hidden>Revisar señal vigente de esta compañía</button>
+<button id="entry-reopen" class="secondary" type="button" hidden>Volver a Telegram para renovar acceso</button>
+<label>Contrato · ITM u OTM hasta el 5.º strike<select id="entry-contract"><option value="">Selecciona un contrato</option></select></label>
+<p id="entry-quote" class="muted"></p>
+<button id="entry-refresh" class="secondary" type="button">Actualizar cotización del contrato elegido</button>
+<section id="entry-chain"><h3>Cadena de opciones · Datos de Schwab</h3>
+<p id="entry-chain-time" class="muted"></p>
+<label><input id="entry-chain-all" type="checkbox"> Mostrar toda la cadena para comparar</label>
+<p class="muted">Se actualiza automáticamente. «Elegir» conserva el contrato; la compra requiere que cumpla ITM u OTM hasta el 5.º strike, rango, spread y cotización vigente.</p>
+<div class="chain-scroll"><table><thead><tr><th>Strike</th><th>Tipo</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Estado</th><th>Selección</th></tr></thead><tbody id="entry-chain-rows"></tbody></table></div>
+<div class="chain-pages"><button id="entry-chain-prev" class="secondary" type="button">Anterior</button><span id="entry-chain-page"></span><button id="entry-chain-next" class="secondary" type="button">Siguiente</button></div></section>
+<label>Cantidad de contratos<input id="entry-quantity" type="number" min="1" max="100000" step="1" inputmode="numeric" placeholder="Elige cantidad"></label>
+<label>Objetivo de ganancia<select id="entry-target"><option value="">Elige objetivo</option><option value="10">10%</option><option value="20">20%</option><option value="35">35%</option><option value="100">100%</option><option value="MANUAL">Cierre manual</option></select></label>
+<p id="entry-cost"></p><p id="entry-stop"></p>
+<p id="entry-buy-state" role="status" aria-live="polite">Comprobando datos para preparar tu compra.</p>
+<button id="entry-buy" type="button" disabled>Ejecutar compra · SIMULADA</button>
+<div id="entry-feedback" role="status" aria-live="polite" tabindex="-1" hidden><h3 id="entry-feedback-title"></h3><p id="entry-feedback-detail"></p></div>
+<p class="muted">Conservamos tu preparación durante la sesión del aviso, aunque cambie la vela o retroceda el precio. Preseleccionamos el contrato apto más cercano al spot; puedes cambiarlo. Tú indicas cantidad y objetivo, y confirmas con cotizaciones actuales. Un contrato guardado no se compra con precios antiguos. Después del fill se aplican el stop del 10%, tu objetivo y el cierre manual.</p></section>
+<section id="signal-watch" hidden><h2 id="watch-title">Estado de la señal</h2><p id="watch-reason"></p><p id="watch-time" class="muted"></p><p id="watch-price"></p>
+<p>Esta vista no compra ni crea una operación. Pulsa «Ir a preparación simulada» para elegir contrato, cantidad y objetivo. La compra requiere una señal vigente y tu confirmación explícita.</p>
+<button id="watch-entry" type="button">Ir a preparación simulada</button><button id="watch-back" class="secondary" type="button">Volver al chat</button></section>
+<section id="selection" hidden><h2 id="contract">Contrato</h2><p id="summary"></p><p id="fill"></p></section>
+<section id="sale-result" hidden><h2 id="sale-title">Resultado confirmado</h2><p id="sale-quantity"></p><p id="sale-prices"></p><p id="sale-gross"></p><p id="sale-net"></p><p id="sale-reason"></p></section>
+<section id="position-metrics" class="metrics" aria-label="Seguimiento de la posición">
+<article><span>Prima media ejecutada</span><strong id="average">—</strong></article>
+<article><span id="bid-label">Bid del contrato</span><strong id="bid">—</strong></article>
+<article><span>Ganancia / pérdida bruta</span><strong id="pnl">—</strong><small id="pct"></small></article>
+<article><span>Resultado neto estimado</span><strong id="net">—</strong></article>
+<article><span>Objetivo de venta</span><strong id="target">—</strong></article>
+<article><span>Umbral del stop</span><strong id="stop">—</strong></article></section>
+<p id="quote-age" class="muted">Esperando cotizaciones verificadas.</p>
+<section id="position-chart" class="chart"><h2>Bid del contrato</h2><canvas id="chart" role="img" aria-label="Bid observado y niveles de entrada, objetivo y stop"></canvas>
+<p class="muted">Observaciones desde que abriste esta vista. Los huecos no se unen. Los niveles son umbrales, sin garantía de ejecución.</p></section>
+<section id="actions" hidden><h2>Gestionar operación</h2><button id="close" type="button" hidden>Cerrar posición simulada</button><div id="pending"></div>
+<div id="review" hidden><p id="review-text"></p><button id="confirm" type="button">Confirmar</button><button id="dismiss" class="secondary" type="button">Volver</button></div></section>
+<footer>El Ask se usa para comprar y el Bid para estimar una venta. Una solicitud pendiente no equivale a una ejecución. Las órdenes reales están deshabilitadas.</footer>
+</main></body></html>

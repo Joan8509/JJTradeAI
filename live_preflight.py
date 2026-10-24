@@ -22,6 +22,7 @@ def run_live_preflight(
     *, symbols: tuple[str, ...], benchmarks: tuple[str, ...], days: int,
     database: str | Path, option_policy: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
+    integrity_verified_by_backup: bool = False,
 ) -> dict[str, Any]:
     """Valida configuración local sin revelar secretos ni llamar la red."""
     env = environment if environment is not None else os.environ
@@ -53,9 +54,12 @@ def run_live_preflight(
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("CREATE TABLE preflight_write_probe (id INTEGER)")
             connection.rollback()
-            integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
-            if integrity != "ok":
-                raise ValueError(f"quick_check={integrity}")
+            if integrity_verified_by_backup:
+                connection.execute('PRAGMA schema_version').fetchone()
+            else:
+                integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
+                if integrity != "ok":
+                    raise ValueError(f"quick_check={integrity}")
         finally:
             connection.close()
     except (OSError, sqlite3.Error, ValueError) as error:
@@ -67,6 +71,9 @@ def run_live_preflight(
         )
     else:
         _check(checks, "database", True, f"Base SQLite escribible: {path}.")
+        if integrity_verified_by_backup:
+            checks.append(dict(name='database_integrity',status='PENDIENTE_BACKUP',
+                detail='La copia obligatoria debe superar integridad antes de conectar al mercado.'))
     if option_policy is None:
         checks.append({"name": "option_policy", "status": "OMITIDO", "detail": "Opciones desactivadas; no se consultará la cadena."})
     else:

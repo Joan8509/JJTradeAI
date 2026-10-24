@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 from analysis_models import CriterionEvaluation, EvaluationStatus, GateStatus
 
@@ -74,7 +75,8 @@ def evaluate_option_risk(
         raise ValueError("El mínimo de días al vencimiento no puede ser negativo.")
 
     evaluation_date = as_of or date.today()
-    spread = quote.ask - quote.bid
+    # Exact quoted-price subtraction: e.g.1.05-1.00 must pass a0.05 cap.
+    spread = float(Decimal(str(quote.ask)) - Decimal(str(quote.bid)))
     spread_pct = spread / quote.ask * 100
     distance_pct = abs(quote.strike - quote.spot) / quote.spot * 100
     days_to_expiration = (quote.expiration - evaluation_date).days

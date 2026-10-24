@@ -1,0 +1,26 @@
+{
+  "mode": "LOCAL_SIMULATION",
+  "real_orders_enabled": false,
+  "account_alias": null,
+  "entry_sizing_mode": "MANUAL_CONFIRMATION",
+  "min_dte": 0,
+  "max_dte": null,
+  "min_bid_size": null,
+  "min_ask_size": null,
+  "max_open_positions": null,
+  "max_entries_per_day": null,
+  "max_daily_entry_cost": null,
+  "max_daily_loss": null,
+  "stop_loss_pct": 20,
+  "max_holding_minutes": null,
+  "fee_per_contract": null,
+  "entry_limit_rule": "AT_ASK_LIMIT",
+  "risk": {
+    "max_spread_absolute": 0.05,
+    "max_spread_pct": null,
+    "max_spot_strike_distance_pct": null,
+    "min_days_to_expiration": 0,
+    "max_position_cost": null
+  },
+  "verified_contract_price_increments": {}
+}

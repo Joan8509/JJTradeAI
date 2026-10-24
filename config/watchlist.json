@@ -17,7 +17,8 @@
     "AMZN",
     "NFLX",
     "AVGO",
-    "SPCX"
+    "SPCX",
+    "SLV"
   ],
   "benchmarks": [
     "SPY",

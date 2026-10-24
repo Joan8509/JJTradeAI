@@ -9,6 +9,33 @@ from telegram_alerts import TelegramError, _protect, call, connection, discover,
 
 
 class TelegramConnectionTests(unittest.TestCase):
+    def setUp(self):
+        # Discovery must never acquire the operational bot's real lock in tests.
+        self.lock_patch=patch('telegram_manual_controls.poller_lock')
+        self.lock_patch.start();self.addCleanup(self.lock_patch.stop)
+
+    def test_local_readiness_catches_wrong_user_without_sending_or_exposing_key(self):
+        from telegram_alerts import local_readiness
+        with patch('telegram_alerts.connection',return_value={'chat_id':'test','protected_token':'eA=='}), \
+             patch('telegram_alerts._protect',side_effect=TelegramError('Private detail')), \
+             patch('telegram_alerts.call') as api:
+            self.assertEqual(local_readiness(),'CLAVE_NO_DISPONIBLE')
+            api.assert_not_called()
+
+    def test_local_readiness_validates_environment_without_claiming_remote_auth(self):
+        from telegram_alerts import local_readiness
+        with patch.dict('os.environ',{'TELEGRAM_BOT_TOKEN':'123:abc_xyz','TELEGRAM_CHAT_ID':'test'}), \
+             patch('telegram_alerts.call') as api:
+            self.assertEqual(local_readiness(),'LISTO_LOCAL')
+            api.assert_not_called()
+        with patch('telegram_alerts.connection',return_value=None):
+            self.assertEqual(local_readiness(),'SIN_CONEXION')
+
+    def test_local_readiness_rejects_malformed_private_configuration(self):
+        from telegram_alerts import local_readiness
+        with patch('telegram_alerts.connection',return_value={'chat_id':'test','protected_token':'not base64'}):
+            self.assertEqual(local_readiness(),'CLAVE_NO_DISPONIBLE')
+
     def test_review_button_is_sent_without_broker_command_or_credentials(self):
         markup={'inline_keyboard':[[{'text':'Abrir señal y operar','url':'https://jj.example/?operar=AAPL'}]]}
         with patch.dict('os.environ',{'TELEGRAM_BOT_TOKEN':'123:test','TELEGRAM_CHAT_ID':'1'}), \

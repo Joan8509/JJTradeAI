@@ -22,11 +22,25 @@ def create_visual_evidence_backup(
     visual_directory: str | Path,
     *,
     destination: str | Path | None = None,
+    verified_backup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Empaqueta las imagenes referidas por un snapshot SQLite ya verificado."""
     database_path = Path(database_backup).resolve()
     visual_root = Path(visual_directory).resolve()
-    database_verification = verify_sqlite_backup(database_path)
+    if verified_backup is None:
+        database_verification = verify_sqlite_backup(database_path)
+    else:
+        # Only a caller that just created/verified this exact immutable snapshot
+        # supplies the receipt. Hash the file again to detect replacement; the
+        # standalone API/CLI retains its independent integrity check by default.
+        if (Path(verified_backup.get('backup_path','')).resolve()!=database_path or
+                verified_backup.get('integrity')!='ok' or
+                verified_backup.get('size_bytes')!=database_path.stat().st_size):
+            raise ValueError('El recibo no corresponde al respaldo visual.')
+        digest=_sha256(database_path)
+        if digest!=verified_backup.get('sha256'):
+            raise ValueError('El respaldo cambió después de verificarlo.')
+        database_verification=dict(status='OK',sha256=digest)
     if database_verification["status"] != "OK":
         raise ValueError("La base de respaldo no supera integridad SQLite.")
     records = _visual_records(database_path)

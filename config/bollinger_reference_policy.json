@@ -1,0 +1,9 @@
+{
+  "active_scope": "REGULAR",
+  "requested_scope": "EXTENDED_0400_2000_ET",
+  "activation_state": "PENDING_COVERAGE",
+  "user_authorized": true,
+  "signal_hours": "OFFICIAL_REGULAR_SESSION",
+  "missing_period_policy": "UNAVAILABLE_NO_SUBSTITUTION",
+  "half_day_extended_hours": "PENDING_VERIFICATION"
+}

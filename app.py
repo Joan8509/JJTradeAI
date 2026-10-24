@@ -29,7 +29,7 @@ from alpaca_market_data import (
     AlpacaMarketDataProvider,
     build_alpaca_data_bundle,
 )
-from market_store import MarketBarStore, MarketContinuityService
+from market_store import DEFAULT_MARKET_DATABASE, MarketBarStore, MarketContinuityService
 from market_calendar import AlpacaMarketCalendarProvider, MarketSessionRepository, session_close_map
 from live_preflight import recent_live_preflights
 from live_bollinger_preview import LiveBollingerPreviewRepository
@@ -1259,6 +1259,20 @@ def _render_scanner_controls(process_status: Mapping[str, object]) -> None:
                 st.success(f"Parada solicitada al PID {result['scanner_pid']}.")
 
 
+@st.cache_data(ttl=60, max_entries=4, show_spinner=False)
+def _dashboard_price_range_summary(database, symbol, market_date):
+    from bounded_market_history import load_history
+    from live_market import normalize_minute_bars
+    bars = pd.DataFrame()
+    for feed in ('iex', 'sip', 'delayed_sip'):
+        candidate = load_history(database, symbol=symbol, provider='ALPACA', feed=feed,
+                                 start=None, end=None)
+        if not candidate.empty:
+            bars = normalize_minute_bars(candidate)
+            break
+    return calculate_price_range(bars, current_market_date=market_date)
+
+
 def _render_price_ranges() -> None:
     """Compara la referencia de opciones con el rango dinámico de la acción."""
     option_ranges = load_option_price_ranges()
@@ -1283,10 +1297,10 @@ def _render_price_ranges() -> None:
     st.markdown("#### Referencia de precios de opciones")
     st.markdown(
         f"""<div class="jj-range-grid jj-range-reference">
-        <div class="jj-range-card featured"><span>Rango óptimo</span>
-        <b>${reference['optimal_low']:,.0f} – ${reference['optimal_high']:,.0f}</b></div>
-        <div class="jj-range-card"><span>Mínimo y máximo</span>
-        <b>${reference['minimum']:,.0f} – ${reference['maximum']:,.0f}</b></div>
+        <div class="jj-range-card featured"><span>Prima óptima para entrar (USD)</span>
+        <b>${reference['optimal_low']/100:,.2f} – ${reference['optimal_high']/100:,.2f}</b></div>
+        <div class="jj-range-card"><span>Mínimo y máximo de referencia (USD de prima)</span>
+        <b>${reference['minimum']/100:,.2f} – ${reference['maximum']/100:,.2f}</b></div>
         <div class="jj-range-card"><span>Bloque</span><b>{html.escape(reference['block'])}</b></div>
         <div class="jj-range-card"><span>Fecha del análisis</span><b>{reference['analysis_date']}</b></div>
         </div>""",
@@ -1294,21 +1308,18 @@ def _render_price_ranges() -> None:
     )
     st.caption(
         f"{reference['sector']} · {reference['industry']} · "
-        f"{reference['exchange']}. Valores suministrados en el listado; "
-        "se mantienen separados del precio de la acción."
+        f"{reference['exchange']}. Listado en centavos convertido a prima cotizada; "
+        "por contrato estándar de 100 se multiplica por 100, antes de costos. "
+        "Entrada siempre ITM, dentro del óptimo y con ask − bid ≤ $0.05. "
+        "No son cotizaciones actuales ni el precio de la acción."
     )
     st.markdown("#### Rango dinámico de la acción")
-    store = MarketBarStore(AlertRepository().database_path)
-    bars = pd.DataFrame()
-    for feed in ("iex", "sip", "delayed_sip"):
-        candidate = store.load_frame(symbol=symbol, provider="ALPACA", feed=feed)
-        if not candidate.empty:
-            bars = candidate
-            break
-    summary = calculate_price_range(
-        bars,
-        current_market_date=datetime.now(ZoneInfo("America/New_York")).date(),
-    )
+    try:
+        summary = _dashboard_price_range_summary(str(DEFAULT_MARKET_DATABASE), symbol,
+            datetime.now(ZoneInfo('America/New_York')).date())
+    except (sqlite3.Error, OSError, ValueError):
+        st.info('El rango descriptivo no está disponible ahora. El radar de señales funciona por separado.')
+        return
     if summary is None:
         st.info(
             "Todavía no hay historial suficiente para calcular este rango. "
@@ -1354,27 +1365,57 @@ def render_bollinger_dashboard() -> None:
     st.subheader("Salida de Bollinger con volatilidad · 15 minutos")
     st.caption("Un solo enfoque: detectar el comienzo de una salida y medir si el precio continúa en esa dirección. Avisos tempranos, sin órdenes automáticas.")
     now = datetime.now(timezone.utc)
-    database = AlertRepository().database_path
-    session = MarketSessionRepository(database).session(now.astimezone(ZoneInfo("America/New_York")).date())
-    market_open = session is not None and session.opens_at <= now < session.closes_at
+    database = DEFAULT_MARKET_DATABASE
+    from bollinger_dashboard_data import read_snapshot
+    states, events, session = [], [], None
+    try:
+        snapshot = read_snapshot(database, now.astimezone(ZoneInfo('America/New_York')).date())
+        states, events, session = snapshot['states'], snapshot['events'], snapshot['session']
+    except (sqlite3.Error, OSError, ValueError):
+        st.warning('No se pudieron consultar los estados del radar. Revisa el buscador.')
+    now = datetime.now(timezone.utc)
+    market_open = session is not None and datetime.fromisoformat(session[0]) <= now < datetime.fromisoformat(session[1])
     process_status = read_instance_status("exports/live_scanner.lock")
     configured = load_watchlist()["symbols"]
     _render_scanner_controls(process_status)
+    from bollinger_phone_worker import STATUS_PATH
+    try:
+        runtime = json.loads(STATUS_PATH.read_text(encoding='utf-8'))
+        now = datetime.now(timezone.utc)
+        stamp = datetime.fromisoformat(runtime['heartbeat'])
+        if not timedelta(0) <= now-stamp <= timedelta(seconds=30):
+            st.error('El radar de avisos no tiene actividad reciente comprobada. Revisa el servicio antes de confiar en las alertas.')
+        elif runtime.get('telegram_readiness') in {'SIN_CONEXION', 'CLAVE_INVALIDA', 'CLAVE_NO_DISPONIBLE'}:
+            st.error('El radar no puede usar la conexión local de Telegram. Revisa el bot y el usuario que ejecuta el servicio.')
+        elif runtime.get('last_delivery_state') == 'ENVIO_NO_CONFIRMADO':
+            st.error('El último aviso no tiene un envío confirmado en Telegram. Revisa Notificaciones.')
+    except (OSError, ValueError, KeyError):
+        st.warning('No se pudo comprobar la actividad del radar de avisos.')
     columns = st.columns(3)
     columns[0].metric("Estrategia", "Bollinger 15m")
     columns[1].metric("Símbolos configurados", len(configured))
     columns[2].metric("Sesión regular", "Abierta" if market_open else "Cerrada / sin calendario")
+    if market_open:
+        from radar_health import fast_feed_health
+        try:
+            feed_health = fast_feed_health(database, now=now)
+            if feed_health['state'] in {'REVISAR_RELOJ', 'HEARTBEAT_FUTURO'}:
+                st.error('Los horarios de mercado y del equipo no coinciden. El radar puede rechazar precios y perder avisos. Sincroniza la hora del servidor o PC.')
+            elif feed_health['state'] in {'DESCONECTADO', 'HEARTBEAT_ATRASADO', 'HEARTBEAT_INVALIDO'}:
+                st.warning('El flujo rápido no tiene una conexión vigente comprobada. Revisa el buscador.')
+            elif feed_health['state'] == 'RECHAZOS_DE_FRESCURA':
+                st.warning('Se están descartando precios por su horario o antigüedad. La conexión por sí sola no confirma que todos los movimientos se estén evaluando.')
+            with st.expander('Estado de recepción de precios'):
+                st.write('Diagnóstico: ' + feed_health['state'])
+                st.write('Últimos 60 segundos: ' + str(feed_health['sample_count']) + ' observaciones revisadas (máximo 1000).')
+                st.write('Precios por delante del reloj al recibirse: ' + str(feed_health['future_count']))
+                st.write('Mayor diferencia observada: ' + str(feed_health['max_future_ms']) + ' ms.')
+                st.caption('Compara las horas registradas; no mide rentabilidad ni confirma por sí solo la causa del desfase.')
+        except (sqlite3.Error, OSError, ValueError):
+            st.warning('No se pudo verificar la recepción de precios del radar.')
     st.caption("Salida superior → movimiento alcista / CALL. Salida inferior → movimiento bajista / PUT. La vela debe abrir dentro de las bandas anteriores y después salir con volatilidad. Una apertura ya expuesta queda excluida.")
-    states, events = [], []
-    try:
-        with closing(sqlite3.connect(f"file:{Path(database).resolve().as_posix()}?mode=ro", uri=True)) as db:
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "bollinger_radar_state" in tables:
-                states = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM bollinger_radar_state")]
-            if "bollinger_live_events" in tables:
-                events = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM bollinger_live_events ORDER BY detected_at DESC LIMIT 50")]
-    except (sqlite3.Error, OSError, ValueError):
-        st.warning("No se pudieron consultar los estados del radar. Revisa el buscador.")
+    now = datetime.now(timezone.utc)
+    market_open = session is not None and datetime.fromisoformat(session[0]) <= now < datetime.fromisoformat(session[1])
     current = [item for item in states if item['symbol'] in configured and item.get("version") == STRATEGY_VERSION and _bollinger_state_is_current(item, now=now, market_open=market_open)]
     events = [event for event in events if event['symbol'] in configured and event.get("version") == STRATEGY_VERSION]
     detected = [item for item in current if item.get("signal")]
@@ -1391,15 +1432,30 @@ def render_bollinger_dashboard() -> None:
         with st.container(border=True):
             st.markdown(f"**{item['symbol']} · {direction} · Salida en formación**")
             st.write(f"Disipador {signal['side'].lower()} · Precio observado: {signal['price']:.2f}")
+            st.caption('Vela de 15 minutos: ' + _market_event_local_time(signal['candle']))
+            reference = load_option_price_ranges().get(item['symbol'])
+            if reference:
+                st.caption(f"Prima óptima para entrar: ${reference['optimal_low']/100:.2f} – ${reference['optimal_high']/100:.2f} USD. No es el bid/ask actual del contrato.")
             if st.button('Operar',key='manual_review_'+item['symbol']):
                 st.query_params.update(operar=item['symbol'],
                     lado='CALL' if signal['side']=='SUPERIOR' else 'PUT',
                     senal=item['source_timestamp'])
                 st.rerun()
-            if signal.get('ma_context'):
+            context = signal.get('ma_context')
+            if not context:
+                original = next((event for event in events
+                    if event.get('symbol') == item['symbol'] and event.get('provider') == item.get('provider')
+                    and event.get('feed') == item.get('feed') and event.get('side') == signal['side']
+                    and _parse_alert_time(event.get('candle')) == _parse_alert_time(signal.get('candle'))
+                    and event.get('ma_context')), None)
+                if original:
+                    context = original['ma_context']
+                    st.caption('Contexto de la detección guardada a ' + _market_event_local_time(original['detected_at']) +
+                               f" · precio de referencia {original['price']:.2f}. Es descriptivo; no confirma la salida actual.")
+            if context:
                 from bollinger_ma_context import context_text
-                st.caption(context_text(signal['ma_context']))
-                reference_levels=signal['ma_context'].get('price_levels',{}).get('levels',[])
+                st.caption(context_text(context))
+                reference_levels=context.get('price_levels',{}).get('levels',[])
                 if reference_levels:
                     with st.expander('Cierre anterior y máximo del historial'):
                         st.dataframe(pd.DataFrame([{'Nivel':level['label'],'Precio':level['value'],
@@ -1408,7 +1464,6 @@ def render_bollinger_dashboard() -> None:
                             'Cobertura':level['quality']} for level in reference_levels]),hide_index=True,width='stretch')
                         st.caption('El máximo disponible no confirma el all-time high real. Los niveles son referencias posibles, no garantizan un freno al precio.')
                 with st.expander('Ver medias, cruces y cierres de Hora'):
-                    context = signal['ma_context']
                     pairs = []
                     for frame in context.get('frames', []):
                         for pair in frame.get('pairs', []):
@@ -1433,10 +1488,10 @@ def render_bollinger_dashboard() -> None:
         latest = {item["symbol"]: item for item in states}
         fresh = {item["symbol"] for item in current}
         st.dataframe(pd.DataFrame([
-            {"Símbolo": symbol, "Estado": "Salida detectada" if symbol in fresh and latest[symbol].get("signal") else "Vigilando · sin salida nueva" if symbol in fresh else "Esperando sesión" if not market_open else "Sin datos recientes / pendiente de activar",
+            {"Símbolo": symbol, "Estado": "Salida detectada" if symbol in fresh and latest[symbol].get("signal") else "Esperando historial o apertura oficial" if symbol in fresh and latest[symbol].get('data_reason') == 'WAITING_FOR_OPEN_OR_HISTORY' else "Vela en cuarentena por corrección" if symbol in fresh and latest[symbol].get('data_reason') == 'CORRECTION_QUARANTINE' else "Vigilando · sin salida nueva" if symbol in fresh else "Esperando sesión" if not market_open else "Sin datos recientes / pendiente de activar",
              "Última barra": _market_event_local_time(latest[symbol]["source_timestamp"]) if symbol in latest else "Sin registro"}
             for symbol in configured]), width="stretch", hide_index=True)
-    with st.expander("Últimas detecciones guardadas · historial"):
+    with st.expander("Últimas detecciones guardadas · historial", expanded=True):
         if events:
             st.dataframe(pd.DataFrame([
                 {"Compañía": e["symbol"], "Salida": e["side"], "Detectada": _market_event_local_time(e["detected_at"]),
@@ -1444,7 +1499,7 @@ def render_bollinger_dashboard() -> None:
                 for e in events]), width="stretch", hide_index=True)
         else:
             st.caption("Todavía no hay detecciones en vivo guardadas.")
-    st.caption("La observación continúa aunque pauses Telegram. El PC, el buscador y el radar deben permanecer encendidos.")
+    st.caption("La observación continúa aunque pauses Telegram. En la VPS, el colector y el radar trabajan en segundo plano; puedes cerrar esta página.")
 
 
 @st.fragment(run_every="15s")
@@ -4814,6 +4869,12 @@ def render_telegram_connection() -> None:
             st.info(radar_labels.get(radar["state"], radar["state"]))
             if radar.get("errors"):
                 st.warning("Telegram no confirmó algún envío. Revisa la conexión antes de confiar en los avisos.")
+            if radar.get('last_delivery_state') == 'ENVIO_NO_CONFIRMADO':
+                st.error('El último aviso no pudo confirmarse en Telegram. Revisa la conexión del bot.')
+            elif radar.get('last_delivery_state') == 'ENVIANDO':
+                st.warning('El último aviso sigue sin confirmación de envío. Revisa el servicio de Telegram.')
+            elif radar.get('last_delivery_state') == 'ENVIADO':
+                st.caption('Último envío aceptado por Telegram: ' + _market_event_local_time(radar.get('last_delivery_at')) + '. No confirma lectura en el teléfono.')
     except (OSError, ValueError, KeyError):
         st.warning("El servicio de avisos aún no ha informado su estado.")
     st.caption("El equipo y el buscador deben permanecer encendidos y conectados. Se revisan barras de un minuto; Telegram e Internet pueden añadir demora. Las alertas no garantizan acierto.")
@@ -4964,12 +5025,17 @@ def _render_dashboard_visuals() -> None:
 
 
 def main() -> None:
-    """Construye la navegación principal de la aplicación."""
+    from sqlite_runtime_guard import require_safe_wal_runtime
+    require_safe_wal_runtime(DEFAULT_MARKET_DATABASE)
+    # Construye la navegación principal de la aplicación.
+    from mobile_layout import MOBILE_STYLE
+    st.markdown(MOBILE_STYLE, unsafe_allow_html=True)
     st.markdown("""<style>
     .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
         background-color: #08111f !important; color: #e8eef7 !important;
     }
     [data-testid="stHeader"] {background-color: #08111f !important;}
+    [data-testid="stToolbar"] {display:none !important;}
     [data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p,
     [data-testid="stMarkdownContainer"] h1, [data-testid="stMarkdownContainer"] h2,
     [data-testid="stMarkdownContainer"] h3, [data-testid="stMetricValue"],
@@ -4981,15 +5047,27 @@ def main() -> None:
     }
     [data-testid="stVerticalBlockBorderWrapper"] {border-color: #29405c !important;}
     </style>""", unsafe_allow_html=True)
-    _render_dashboard_visuals()
+    if st.query_params.get('operaciones')=='1':
+        from manual_execution_panel import render_manual_positions
+        if st.button('Volver a Mis operaciones'):
+            st.query_params.clear();st.query_params['resultados']='1'
+            st.rerun()
+        render_manual_positions()
+        return
     if st.query_params.get('operar'):
         from manual_trade_panel import render_manual_trade
-        if st.button('Volver al radar'):
+        if st.button('Volver al dashboard'):
             st.query_params.clear()
             st.rerun()
         render_manual_trade(st.query_params['operar'].strip().upper(),
             st.query_params.get('lado','CALL'),st.query_params.get('senal'))
         return
+    if st.query_params.get('ajustes')!='1':
+        from dashboard_home import render_dashboard_home
+        _render_dashboard_visuals()
+        render_dashboard_home(show_header=False)
+        return
+    _render_dashboard_visuals()
     if "risk_status" not in st.session_state:
         st.session_state["risk_status"] = GateStatus.NO_DISPONIBLE
     if "risk_symbol" not in st.session_state:

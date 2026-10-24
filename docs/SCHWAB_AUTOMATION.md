@@ -1,6 +1,75 @@
-# Integración propuesta con Charles Schwab
+# Automatización con Charles Schwab
 
-Estado: diseño preparado; sin conexión al broker y sin envío de órdenes.
+## Estado vigente23/10/2026
+
+Ensayo local manual y automático con datos reales de mercado; órdenes reales
+deshabilitadas. Nuevas operaciones stop20%, objetivos elegidos y cierre manual.
+Entrada automática con límite al techo del rango autorizado, caducidad10s,
+monitor despertado al registrar y prioridad de señales nuevas sobre reintentos.
+No se modifican planes ya ejecutados. Ver [checkpoint](GITHUB_CHECKPOINT_2026-10-23.md)
+y [contexto vigente](CURRENT_CONTEXT.md). Un resultado simulado no modifica
+saldos ni posiciones de la cuenta Schwab.
+
+## Estado histórico18/10/2026
+
+OAuth/DPAPI y DATOS reales Schwab verificados; ensayo manual local habilitado,
+stop10%, objetivos elegidos y cierre manual. Perfil actual MARKET_DATA_ONLY.
+Acceso real a saldos/posiciones/cuentas no probado y envío real NO implementado:
+permanece bloqueado por código. La cuenta vinculada por consentimiento OAuth
+no acredita permisos de trading ni convierte resultados del ensayo en dinero.
+Ruta revisada hacia cuenta real: [SCHWAB_REAL_READINESS_2026-10-18](SCHWAB_REAL_READINESS_2026-10-18.md).
+Estado/pruebas del ensayo: [CURRENT_CONTEXT](CURRENT_CONTEXT.md).
+
+## Estado histórico16/10, sustituido por el estado vigente anterior
+
+Estado16/10/2026: conexión de lectura/OAuth, contratos, ejecución local y
+conciliación implementados y probados en simulación. Cuenta real no conectada;
+órdenes reales deshabilitadas por código. Informe vigente:
+[SCHWAB_IMPLEMENTATION_2026-10-16](SCHWAB_IMPLEMENTATION_2026-10-16.md).
+
+Se conserva el [contrato v4](STRATEGY_OPERATING_CONTRACT.md): apertura propia
+dentro, ambas bandas abriéndose y dirección de precio/apertura/media, sin veto
+por cierre previo fuera. El disparador actual es intraminuto por trades IEX,
+máximo3s, rechazo de futuro y relectura antes de preparar entrada. SuperiorCALL,
+inferiorPUT. SMA/niveles/memoria siguen descriptivos. Avisos y dedup intactos.
+
+El selector ITM existente se comparte ahora en option_contract_selection.py sin
+cambiar su función. Schwab normaliza identidad OCC y datos de contratos estándar,
+exige cotización vigente/tiempo real y un incremento de precio verificado.
+La guarda30s del contrato no reemplaza la guarda3s del detector.
+
+El ensayo utiliza dos bases independientes, ledger y broker local. Una política
+incompleta bloquea entradas; las pruebas usan valores sintéticos identificados
+como tales. Estado incierto persistente no reenvía; fills parciales y cancelación
+se concilian antes de vender solo lo comprado. Objetivo bruto20% sobre VWAP del
+contrato, redondeado al tick; pérdida y tiempo según plan explícito. La pausa
+bloquea entradas y conserva gestión de posiciones. No se presume OCO real.
+
+OAuth y su receptor están preparados, no configurados ni desplegados: callback
+HTTPS exacto, state/cookie de un solo uso, secretos/tokens cifrados con DPAPI bajo
+Administrator y renovación persistida. Solo GET de recursos y POST de OAuth;
+sin transporte de envío/cancelación/reemplazo de órdenes. App/cuenta, permisos,
+saldos, respuestas reales y parámetros del usuario siguen pendientes.
+
+Validación:128pruebas relevantesOK,46nuevas Schwab, ensayo completo con detector
+real sobre mercado sintético y auditoría estática sin hallazgos. No es prueba de
+API real, recepción RTH, entrega Telegram ni rentabilidad.
+
+```powershell
+.\venv\Scripts\python.exe -m unittest tests.test_schwab_connection tests.test_schwab_contracts tests.test_schwab_simulation tests.test_schwab_reconciliation tests.test_schwab_workflow -v
+.\venv\Scripts\python.exe schwab_rehearsal.py
+```
+
+El ensayo usa una carpeta temporal nueva; --directory RUTA_NUEVA conserva evidencia
+y rechaza rutas existentes. No usar las bases sintéticas como datos de mercado.
+La consola Hyper-V y el reinicio son pendientes operativos independientes, sin
+bloquear desarrollo; no reiniciar ahora. Radar mantiene sus controles vigentes.
+
+## Referencia histórica anterior al desarrollo del16/10
+
+El contenido siguiente conserva acuerdos y antecedentes. Sus menciones de
+fuente exclusivamente por minuto o integración únicamente propuesta quedaron
+sustituidas por el estado y el contrato enlazados arriba.
 
 ## Disparador autorizado para diseñar la integración
 

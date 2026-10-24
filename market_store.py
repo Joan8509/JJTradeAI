@@ -44,6 +44,8 @@ class MarketBarStore:
     """Almacena barras idempotentes sin mezclar proveedores ni feeds."""
 
     def __init__(self, database_path: str | Path = DEFAULT_MARKET_DATABASE) -> None:
+        from sqlite_runtime_guard import require_safe_wal_runtime
+        require_safe_wal_runtime(database_path)
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -124,6 +126,31 @@ class MarketBarStore:
             }]
         )
         return self.upsert_frame(frame, symbol=bar.symbol, provider=provider, feed=feed)
+
+    def upsert_bars(self, bars, *, provider: str, feed: str) -> int:
+        """Persist an ordered stream burst with the same validation, one commit.
+
+        Validate each bar separately: repeated official updates to the same
+        minute remain ordered upserts, not duplicate timestamps in one frame.
+        """
+        rows = []
+        now = datetime.now(timezone.utc).isoformat()
+        for bar in bars:
+            frame = normalize_minute_bars(pd.DataFrame([dict(date=bar.timestamp,
+                open=bar.open, high=bar.high, low=bar.low, close=bar.close, volume=bar.volume)]))
+            identity = _normalize_identity(bar.symbol, provider, feed)
+            row = next(frame.itertuples(index=False))
+            rows.append((*identity, row.date.isoformat(), row.open, row.high,
+                         row.low, row.close, row.volume, now))
+        if not rows:
+            return 0
+        with self._connect() as connection:
+            connection.executemany("INSERT INTO minute_bars "
+                "(symbol,provider,feed,timestamp,open,high,low,close,volume,received_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,feed,symbol,timestamp) "
+                "DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,"
+                "close=excluded.close,volume=excluded.volume,received_at=excluded.received_at", rows)
+        return len(rows)
 
     def load_frame(
         self,

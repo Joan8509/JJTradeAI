@@ -7,6 +7,14 @@ from price_ranges import calculate_price_range, load_option_price_ranges
 
 
 class PriceRangeTests(unittest.TestCase):
+    def test_fresh_install_without_market_data_returns_no_range(self):
+        self.assertIsNone(calculate_price_range(pd.DataFrame(), current_market_date=date(2026,10,14)))
+        self.assertIsNone(calculate_price_range(pd.DataFrame(columns=['date','open','high','low','close','volume']), current_market_date=date(2026,10,14)))
+
+    def test_nonempty_malformed_market_data_still_fails_validation(self):
+        with self.assertRaises(ValueError):
+            calculate_price_range(pd.DataFrame([{'close':100}]), current_market_date=date(2026,10,14))
+
     def test_loads_complete_option_reference_list(self) -> None:
         ranges = load_option_price_ranges()
         self.assertEqual(len(ranges), 53)

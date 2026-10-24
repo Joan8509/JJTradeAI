@@ -1,3 +1,4 @@
+from contextlib import closing
 """Intraminute timing, opening integrity, corrections and queue isolation."""
 from datetime import datetime, timedelta, timezone
 import json
@@ -11,7 +12,8 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from bollinger_tick_stream import TickGeometry, TickRepository, RealtimeBollingerWorker, eligible_trade
+from bollinger_tick_stream import (TickGeometry, TickRepository, RealtimeBollingerWorker,
+                                   eligible_trade, record_ingest_failure)
 from bollinger_phone_worker import tick
 from data_providers import prepare_market_frame
 from live_market import MarketBar
@@ -42,6 +44,36 @@ def seed(database):
 
 
 class TickGeometryTests(unittest.TestCase):
+    def test_loaded_receipt_reports_authorized_threshold_and_source_hashes(self):
+        from bollinger_tick_stream import record_ingest_revision
+        record_ingest_revision(self.database)
+        receipt=json.loads((self.database.parent/'trade_review/ingest_runtime/loaded.json').read_text())
+        self.assertEqual(receipt['minimum_band_expansion_pct'],1)
+        self.assertEqual(receipt['sqlite_version'],sqlite3.sqlite_version)
+        self.assertEqual(len(receipt['expansion_source_sha256']),64)
+        self.assertEqual(len(receipt['detector_source_sha256']),64)
+
+    def test_fast_path_filters_weak_band_then_accepts_stronger_move(self):
+        from bollinger_phone_worker import bands_at_open
+        self.observe(100.,1,1)
+        prior=self.geometry.states['AAPL']['history']
+        pu,pl=bands_at_open(prior[:-1],prior[-1])
+        weak=None;strong=None
+        for cents in range(10001,11001):
+            price=cents/100
+            u,l=bands_at_open(prior[1:],price)
+            if price>u and u>pu and l<pl:
+                minimum=100*min(u-pu,pl-l)/(pu-pl)
+                if minimum<1:weak=price
+                elif weak is not None:strong=price;break
+        self.assertIsNotNone(weak);self.assertIsNotNone(strong)
+        snapshot,reason=self.observe(weak,2,2)
+        self.assertIsNone(snapshot['signal']);self.assertEqual(reason,'READY_NO_EXIT')
+        snapshot,reason=self.observe(strong,3,3)
+        self.assertEqual(reason,'EXIT')
+        self.assertEqual(snapshot['signal']['band_expansion']['required_pct'],1)
+        self.assertGreaterEqual(snapshot['signal']['band_expansion']['minimum_pct'],1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -54,6 +86,30 @@ class TickGeometryTests(unittest.TestCase):
     def observe(self,price,offset,identifier):
         self.now=CANDLE+timedelta(seconds=offset)
         return self.geometry.observe(trade(price,self.now,identifier),self.now)
+
+    def test_ingest_failure_retains_sqlite_code_without_raw_error_or_credentials(self):
+        error = sqlite3.OperationalError('fixture-secret-token must never be logged')
+        error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        record_ingest_failure(self.database, 'FAST_INGEST_FAILED', error)
+        text = (self.database.parent/'fast_ingest_failure.json').read_text()
+        result = json.loads(text)
+        self.assertEqual(result['sqlite_errorcode'], sqlite3.SQLITE_BUSY)
+        self.assertEqual(result['error_type'], 'OperationalError')
+        self.assertNotIn('fixture-secret-token', text)
+
+    def test_background_analysis_failure_records_evidence_and_marks_worker_failed(self):
+        worker = RealtimeBollingerWorker(self.database, 'iex', ['AAPL'])
+        try:
+            def fail(bar):
+                raise sqlite3.OperationalError('private-fixture must not be logged')
+            worker.analysis.put((fail, None))
+            self.assertTrue(worker.failed.wait(2))
+            result = json.loads((self.database.parent/'fast_ingest_failure.json').read_text())
+            self.assertEqual(result['stage'], 'BAR_ANALYSIS_FAILED')
+            self.assertEqual(result['error_type'], 'OperationalError')
+            self.assertNotIn('private-fixture', json.dumps(result))
+        finally:
+            worker.close()
 
     def test_both_directions_inside_first_minute_match_existing_geometry(self):
         from bollinger_phone_worker import detect_exit
@@ -159,6 +215,34 @@ class TickGeometryTests(unittest.TestCase):
         self.observe(100.,1,1)
         self.assertEqual(self.observe(104.,2,2)[1],'WAITING_FOR_OPEN_OR_HISTORY')
 
+    def test_missing_older_period_does_not_substitute_an_earlier_close(self):
+        # Last official closing minute is present and twenty aggregate rows
+        # remain, but one required older period disappeared in a feed outage.
+        missing = CANDLE.replace(day=12, hour=18, minute=0)
+        with closing(sqlite3.connect(self.database)) as db:
+            with db:
+                db.execute('DELETE FROM minute_bars WHERE timestamp>=? AND timestamp<?',
+                           (missing.isoformat(), (missing+timedelta(minutes=15)).isoformat()))
+        self.observe(100.,1,1)
+        snapshot, reason = self.observe(104.,2,2)
+        self.assertEqual(reason, 'WAITING_FOR_OPEN_OR_HISTORY')
+        self.assertIsNone(snapshot['signal'])
+
+    def test_recovered_older_period_restores_reference_without_historical_signal(self):
+        missing = CANDLE.replace(day=12, hour=18, minute=0)
+        original = self.store.load_frame(symbol='AAPL', provider='ALPACA', feed='iex',
+                                        start=missing, end=missing+timedelta(minutes=14))
+        with closing(sqlite3.connect(self.database)) as db:
+            with db:
+                db.execute('DELETE FROM minute_bars WHERE timestamp>=? AND timestamp<?',
+                           (missing.isoformat(), (missing+timedelta(minutes=15)).isoformat()))
+        self.observe(100.,1,1)
+        self.assertEqual(self.observe(104.,2,2)[1], 'WAITING_FOR_OPEN_OR_HISTORY')
+        self.store.upsert_frame(original, symbol='AAPL', provider='ALPACA', feed='iex', only_missing=True)
+        snapshot, reason = self.observe(104.,3,3)
+        self.assertEqual(reason, 'EXIT')
+        self.assertEqual(snapshot['source_timestamp'], self.now.isoformat())
+
     def test_session_first_candle_can_trigger_before_first_minute_closes(self):
         opening=CANDLE.replace(hour=13,minute=30)
         self.now=opening+timedelta(seconds=1)
@@ -263,6 +347,33 @@ class TickNoticeTests(unittest.TestCase):
                 repo.flush({'AAPL':snapshot},[],state='CONECTADO',feed='iex',symbols=['AAPL'],now=now)
                 with patch('bollinger_phone_worker._minute_signal',side_effect=AssertionError('no minute fallback')):
                     self.assertEqual(tick(database,as_of=now,sender=sender,support_worker=support)['sent'],0)
+
+    def test_trade_and_minute_share_notice_and_original_event(self):
+        now=CANDLE+timedelta(seconds=2)
+        with tempfile.TemporaryDirectory() as directory:
+            database=Path(directory)/'market.db'
+            seed(database)
+            geometry=TickGeometry(database,'iex',now=lambda:now)
+            geometry.status('CONECTADO',CANDLE-timedelta(seconds=1))
+            geometry.observe(trade(100.,now-timedelta(seconds=1),1),now-timedelta(seconds=1))
+            snapshot,_=geometry.observe(trade(104.,now,2),now)
+            repo=TickRepository(database)
+            repo.flush({'AAPL':snapshot},[],state='CONECTADO',feed='iex',symbols=['AAPL'],now=now)
+            sender=Mock(return_value={'message_id':1})
+            with patch('bollinger_phone_worker.enabled',return_value=True), \
+                 patch('bollinger_phone_worker.connection',return_value={'chat_id':'test'}), \
+                 patch('manual_trade_links.signal_link',return_value=None):
+                self.assertEqual(tick(database,as_of=now,sender=sender,support_worker=Mock())['sent'],1)
+                repo.flush({},[],state='DETENIDO',feed='iex',symbols=['AAPL'],now=now)
+                minute_signal=dict(snapshot['signal'],candle=CANDLE.isoformat(),price=105.)
+                with patch('bollinger_phone_worker._minute_signal',return_value=('ALPACA','iex',CANDLE,None,minute_signal,100.)):
+                    self.assertEqual(tick(database,as_of=CANDLE+timedelta(minutes=1),sender=sender,support_worker=Mock())['sent'],0)
+            sender.assert_called_once()
+            with closing(sqlite3.connect(database)) as db, db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM bollinger_live_events').fetchone()[0],1)
+                saved=json.loads(db.execute('SELECT payload_json FROM bollinger_live_events').fetchone()[0])
+                self.assertEqual(saved['source_kind'],'TRADE')
+                self.assertEqual(saved['price'],104.)
 
     def test_slow_bar_analysis_does_not_block_trade_reception(self):
         with tempfile.TemporaryDirectory() as directory:

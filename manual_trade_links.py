@@ -49,6 +49,18 @@ def signal_link(symbol,signal,source_time,*,base_url=None):
     if not url:
         return None
     parts=urlsplit(validate_app_url(url))
-    query={key:value for key,value in parse_qsl(parts.query) if key not in ('operar','lado','senal')}
+    query={key:value for key,value in parse_qsl(parts.query) if key not in ('operar','lado','senal','operaciones')}
     query.update(operar=symbol,lado='CALL' if signal['side']=='SUPERIOR' else 'PUT',senal=source_time.isoformat())
+    return urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode(query),''))
+
+
+def positions_link(*,base_url=None):
+    """Navigation only: never embeds an order, quantity, account or confirmation."""
+    url=base_url or app_url()
+    if not url:
+        return None
+    parts=urlsplit(validate_app_url(url))
+    query={key:value for key,value in parse_qsl(parts.query)
+           if key not in ('operar','lado','senal','operaciones')}
+    query['operaciones']='1'
     return urlunsplit((parts.scheme,parts.netloc,parts.path,urlencode(query),''))
