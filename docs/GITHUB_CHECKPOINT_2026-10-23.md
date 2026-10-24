@@ -1,5 +1,10 @@
 # Estado del código conservado — 23/10/2026
 
+Código publicado en `main`, commit `79f76ff50ee92c039b61961dabcf17675b2b7c78`,
+con SHA remoto verificado el23/10/2026 a20:42ET.210archivos de código, pruebas
+y documentación técnica; las siguientes notas de publicación se guardan en
+un commit documental separado. No se reiniciaron servicios para subirlo.
+
 Este checkpoint conserva el desarrollo conciliado de la VPS: detector intravela,
 avisos persistentes, conexión de lectura Schwab, simulación manual/automática,
 MiniApp Telegram, dashboard móvil, historial y protecciones de ejecución.

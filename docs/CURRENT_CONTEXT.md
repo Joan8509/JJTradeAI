@@ -1,5 +1,15 @@
 # Contexto vigente de JJTrade AI
 
+23/10/2026 20:42 ET: código guardado y push verificado en origin/main,
+commit79f76ff50ee92c039b61961dabcf17675b2b7c78.210archivos de código,
+pruebas y documentación técnica; índice exacto y ASTPython comprobados,
+auditoría sin credenciales reales.84documentos/artefactos históricos privados
+u obsoletos conservados localmente y excluidos. Bases, cuentas y configuración
+privada fuera de Git. No reinicios ni cambios operativos por esta publicación.
+El registro de publicación se guarda en un commit documental posterior;
+consultar Git log para su SHA y el del código. No asumir estado operativo
+actual por el hecho de estar guardado en GitHub.
+
 Actualizado23/10/2026 ET. Instrucciones actuales del usuario prevalecen.
 Leer AGENTS.md, docs/SESSION_STATE_2026-10-23.md y
 [checkpoint t?cnico](GITHUB_CHECKPOINT_2026-10-23.md).

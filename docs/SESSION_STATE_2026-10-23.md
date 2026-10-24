@@ -179,3 +179,22 @@ tras cerrar el archivo (verificación inicial dentro de escritura falló y se
 repitió correctamente al abrirloRO). Diarios históricos privados intactos.
 Checkpoint público GITHUB_CHECKPOINT_2026-10-23.md. Aún sin commit/push;
 siguiente auditar índice exacto, crear commit y push fastforward, verificar SHA.
+
+20:42 ET — Publicación del código completada y verificada.
+Commit79f76ff50ee92c039b61961dabcf17675b2b7c78 en origin/main; gitpush sin
+force y gitls-remote confirman SHA remoto idéntico.210archivos,21646inserciones
+y230eliminaciones. Incluye fuentes/dependencias, pruebas, webMiniApp, política
+pública20 y documentación técnica actual.84documentos de historia operativa o
+artefactos fuera de selección permanecen intactos localmente; ninguno se borra.
+No bases, backups, credenciales, cuentas ni operaciones privadas subidas.
+Índice comparado con210fuentes auditadas, ASTPythonválido y detector de secretos
+sin hallazgos reales; únicas excepciones exactas son URLs sintéticas jj.example
+que verifican rechazo de destinos con credenciales. Checkerwhitespace detectó
+una línea vacía final preexistente, preservada sin modificar código productivo;
+comprobación permite solo ese caso, manteniendo las otras guardas.
+Evidencia local ignored github_save/:audit/staged/commit/pushed.json yZIPCRC
+de recuperación. No se reejecutó suite completa por publicar; se conservan
+resultados anteriores y se comprobó sintaxis/contenido exacto del snapshot.
+No servicios/paradas/reinicios ni llamadas a broker/Telegram por este guardado.
+La constancia se guarda en commit documental separado. No afirmar que bases o
+estado privado puedan recuperarse desde Git: sus respaldos son locales.
