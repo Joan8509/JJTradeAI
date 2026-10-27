@@ -1,6 +1,7 @@
 # Continuidad de JJTrade AI
 
-Actualizado 27/10/2026 ET. Solicitud vigente: guardar las mejoras en GitHub.
+Actualizado 27/10/2026 ET. Mejoras guardadas en GitHub main; código
+7e613b547fd9c2ea7e7cd7ff8c2789f4b2f9ba14, SHA remoto igual comprobado19:49ET.
 Instrucciones actuales del usuario prevalecen. Leer AGENTS.md y
 docs/GITHUB_CHECKPOINT_2026-10-27.md; consultar Git antes de modificar.
 Los diarios operativos locales docs/SESSION_STATE_*.md y la continuidad extensa
@@ -59,7 +60,8 @@ antes de declararla activa. No automatizar contraseñas/MFA ni prometer renovaci
 
 Las revisiones de entradas/salidas/UI tienen pruebas aisladas y recibos locales.
 CheckpointGit solicitado:355testsOK158.411s; paquete revisado sin claves,
-cuentas o bases privadas. Publicación pendiente de confirmar contra SHAremoto.
+cuentas o bases privadas. Publicación del código confirmada contra SHAremoto;
+este recibo de continuidad se conserva en un commit documental posterior.
 Última carga comprobada27Oct19:09ET: background_entry_presentation_v1,
 fresh_pending_exit_quotes_v1, nonblocking_market_cache_v1 y
 network_outside_workflow_lock_v1. HTTP200/monitorREADY y autenticaciónTelegram

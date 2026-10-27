@@ -4,6 +4,10 @@ Guardado solicitado por el usuario. Conserva el desarrollo posterior al
 checkpoint del23Oct: detectorv5 con apertura dentro de bandas actuales y
 expansión mínima3% por banda; contratos y controles de datos conservados.
 
+Publicado en main:7e613b547fd9c2ea7e7cd7ff8c2789f4b2f9ba14,68archivos.
+SHA de refs/heads/main comprobado igual por consulta directa el27Oct19:49ET.
+Esta confirmación se registra en commit documental posterior al de código.
+
 Incluye entradas prioritarias, calendarios preparados, caché/consultas fuera
 de bloqueos compartidos, informes y recibos aparte del dispatch, ventas
 pendientes con consulta nueva y diagnóstico privado asíncrono acotado.
@@ -41,5 +45,6 @@ completa anterior se conserva localmente antes de compactar CURRENT_CONTEXT.
 No se eliminan por excluirlas deGit. No clonar e iniciar un segundo colector
 ni asumir independencia operativa completa a partir de esta copia de código.
 
-La publicación se acredita con el SHA remoto, no por la existencia de este
-documento. CURRENT_CONTEXT contiene contrato vigente y comprobaciones con fecha.
+La publicación se comprobó con el SHA remoto. Guardado no reinició servicios,
+no activó órdenes reales ni envió mensajes. CURRENT_CONTEXT contiene contrato
+vigente y comprobaciones con fecha; no confundirlas con estado actual de procesos.
