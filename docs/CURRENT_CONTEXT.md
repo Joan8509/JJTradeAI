@@ -1,59 +1,75 @@
-# Contexto vigente de JJTrade AI
+# Continuidad de JJTrade AI
 
-23/10/2026 20:42 ET: código guardado y push verificado en origin/main,
-commit79f76ff50ee92c039b61961dabcf17675b2b7c78.210archivos de código,
-pruebas y documentación técnica; índice exacto y ASTPython comprobados,
-auditoría sin credenciales reales.84documentos/artefactos históricos privados
-u obsoletos conservados localmente y excluidos. Bases, cuentas y configuración
-privada fuera de Git. No reinicios ni cambios operativos por esta publicación.
-El registro de publicación se guarda en un commit documental posterior;
-consultar Git log para su SHA y el del código. No asumir estado operativo
-actual por el hecho de estar guardado en GitHub.
+Actualizado 27/10/2026 ET. Solicitud vigente: guardar las mejoras en GitHub.
+Instrucciones actuales del usuario prevalecen. Leer AGENTS.md y
+docs/GITHUB_CHECKPOINT_2026-10-27.md; consultar Git antes de modificar.
+Los diarios operativos locales docs/SESSION_STATE_*.md y la continuidad extensa
+conservada en exports/trade_review/2026-10-27_github_checkpoint/ no se publican.
 
-Actualizado23/10/2026 ET. Instrucciones actuales del usuario prevalecen.
-Leer AGENTS.md, docs/SESSION_STATE_2026-10-23.md y
-[checkpoint t?cnico](GITHUB_CHECKPOINT_2026-10-23.md).
+## Estrategia y controles
 
-## Estado vigente
+Solo SIMULACIÓN LOCAL con cotizaciones Schwab; no es paperMoney. Perfil
+MARKET_DATA_ONLY, órdenes reales OFF. No iniciar otro colector por clonar Git.
+Bollinger15m20/2ddof0:19cierres previos+trade conocido, sin cierre futuro.
+Apertura real de misma vela dentro de bandas DEL MOMENTO DE SALIDA, versión
+v5_apertura_dentro_bandas_actuales. Ambas bandas expanden>=3% CADA UNA sobre
+ancho previo; direcciones de precio/apertura/media conservadas. Ver
+STRATEGY_OPERATING_CONTRACT.md y DYNAMIC_OPENING_BANDS_2026-10-26.md.
+IEX/REGULAR, trade3s, opciones/spot30s, correcciones/cuarentena/calendario.
+Extendida pendiente de cobertura; gráficos externos no son equivalentes por defecto.
+CALLsuperior/PUTinferior; ITM o primeros5strikesOTM inclusive, ATMexcluido.
+Ask en rango aprobado, spread<=0.08. Vencimiento listado más próximo;
+después14ET salta el mismo día. AAPLAsk0.45–0.95, otras52referencias iguales;
+19símbolos en radar, SPCX sin rango aprobado. Ver config/option_price_ranges.csv.
+Nuevos planes stop20%, objetivos10/20/35/100/manual; planes anteriores inmutables.
 
-Solo SIMULACI?N LOCAL con cotizaciones reales Schwab; no es paperMoney.
-?rdenes reales deshabilitadas, perfil MARKET_DATA_ONLY.
-Detector intravela IEX3s, Bollinger15m20/2ddof0, apertura propia dentro,
-ambas bandas1% del ancho previo y direcci?n de precio/apertura/media.
-Referencia regular; extendida preparada sin cobertura acreditada.
+## Entrada, salida y notificaciones
 
-Entrada manual o cola con compa??a/cantidad/objetivo/sesi?n expl?citos.
-CALL superior/PUT inferior. ITM o primeros5strikesOTM inclusive, Ask en rango,
-spreadm?ximo0.08 y Schwab30s. Stop20% para nuevas operaciones; planes anteriores
-inmutables. Objetivos10/20/35/100/manual y cierre manual conservados.
+Fila explícita compañía/cantidad/objetivo/sesión; una compra por autorización.
+Claim durable antes de dispatch; incertidumbre nunca se reintenta. Entrada
+automática al techo de rango autorizado, fill al Ask posterior con tamaño,
+caducidad10s del remanente. Pausa/consentimiento/revalidación no se omiten.
+Señales nuevas tienen prioridad; consultas REST fuera de locks compartidos,
+calendarios preparados, caché subsegundo solo con tiempos originales válidos.
+Informes/recibos MiniApp separados de compra; registro y monitor no esperan UI.
+Ventas pendientes tienen prioridad/GETnuevo, sin consultas redundantes de posición.
+Salida exige quote posterior, tamaño, Bid>=límite y sesión/conciliación válidos.
+La venta conserva límite del Bid que disparó; otro Bid>=objetivo pero inferior
+al límite puede esperar. Cambiar esa política no está aplicado; el stop tampoco
+garantiza pérdida exacta. Journal privado asíncrono y acotado de no-match/latencia.
+Ejecución, seguimiento y Telegram independientes. Avisos de estrategia sin
+botones; avisos de compra/cierre solo con fills confirmados y enlace dashboard.
+Preservar154dedup originales, incluidos16inciertos, aliases e identidades;
+nunca reenviar históricos ni rearmar automáticamente filas consumidas.
 
-Revisi?n fresh_signal_priority_v1: nuevas se?ales preceden reintentos, primera
-nueva corta escaneo; sin200ms tras trabajo, reposo200ms. Clave nueva no hereda
-pausa5s previa; respeta429/Retry-After. Compra despierta monitor. L?mite
-al techo del rango autorizado; fill al Ask posterior real con tama?o; caducidad
-remanente10s, sin rearme ni replay. Telegram estrategia4l?neas sin botones;
-compra/cierre confirmados tienen avisos independientes.154deduporiginales,
-incluidos16inciertos, intactos. No borrar claims para obtener m?s avisos.
+## Interfaz y conexión
 
-?ltima verificaci?n23/10 20:26ET: radar cargado/monitor listo, servicios
-AdministratorSession0, colector/interfaz preservados, HTTPS200, realesOFF.
-No acredita ticks/fills futuros; revalidar procesos, heartbeat y recepci?n
-antes de afirmar funcionamiento. No reiniciar por guardar Git.
-75regresionesOK48.281s y6focalesOK2.875s; tandas previas116/113 se solapan.
-No suite completa ni rentabilidad acreditadas.
+Tres pestañas: Estrategia en Vivo, Operar Automáticamente, Mis operaciones.
+Edición por lotes, objetivos/cantidades comunes o individuales, borrador y
+consentimiento; guardado atómico tras GETSchwab nuevo. Indicador de conexión
+en fondo, caducidad basada en checked_at; editar no pausa entradas. Sin
+refresco automático al editar; seguimiento visual opcional. Fondo estático,
+ancho móvil y referencias descriptivas de resultados, sin aprendizaje decisor.
+Tokens DPAPIAdministrator, refresh porAPI; pestaña de login web no acelera.
+Nueva autorización interactiva en navegadorVPS por callback127.0.0.1.
+Watchdog preventivo implementado; tarea persistente no acreditada, comprobar
+antes de declararla activa. No automatizar contraseñas/MFA ni prometer renovación perpetua.
 
-## Pendientes y conservaci?n
+## Validación, estado y siguientes pasos
 
-Medir detecci?n?registro?fill y causas de noentrada en pr?xima regular, con
-compa??as expl?citamente armadas. Pendientes cobertura extendida, captura
-continua de opciones y pruebas coordinadas de recuperaci?n/RDP/reinicio.
-No otro colector ni avisos hist?ricos/?rdenes reales por clonar el c?digo.
-
-Detalles en STRATEGY_OPERATING_CONTRACT.md, BOUNDED_ENTRY_STOP20_2026-10-23.md,
-FRESH_SIGNAL_PRIORITY_2026-10-23.md, BAND_EXPANSION_FILTER_2026-10-22.md,
-AUTOMATIC_ENTRY_LATENCY_2026-10-22.md y OPENING_PREPARATION_2026-10-22.md.
-
-Bases, cuentas, credenciales DPAPI, operaciones y evidencia permanecen locales,
-fuera de Git. Contexto anterior completo y cambios locales fueron respaldados
-antes de compactar; diarios hist?ricos no se modifican. No restaurar bases
-con Git ni asumir configuraci?n privada disponible en otro equipo.
+Las revisiones de entradas/salidas/UI tienen pruebas aisladas y recibos locales.
+CheckpointGit solicitado:355testsOK158.411s; paquete revisado sin claves,
+cuentas o bases privadas. Publicación pendiente de confirmar contra SHAremoto.
+Última carga comprobada27Oct19:09ET: background_entry_presentation_v1,
+fresh_pending_exit_quotes_v1, nonblocking_market_cache_v1 y
+network_outside_workflow_lock_v1. HTTP200/monitorREADY y autenticaciónTelegram
+comprobados19:09:40ET; esto no demuestra estado presente o recepción futura.
+Rangos actualizados19:35ET por lectura directaCSV, sin reinicio.
+Guardar en Git no reinicia servicios ni ejecuta órdenes o avisos.
+Falta medir tiempos con mercado abierto tras últimas cargas; no prometer
+ganancias ni atribuir toda demora histórica a un solo fallo. No hay serie
+completa de cotizaciones de opciones de los casos anteriores. Mantener
+los controles cuando falten datos/contratos o conexión. Pruebas de recuperación,
+reinicioWindows/RDP y cobertura extendida pendientes; no reiniciar por este guardado.
+Credenciales, cuentas, bases, respaldos, infraestructura y operaciones privadas
+se conservan locales; los datos y herramientas privadas no se suben a GitHub.

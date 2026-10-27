@@ -63,6 +63,57 @@ class ManualExecutionTests(unittest.TestCase):
             with self.subTest(qty=qty,target=target),self.assertRaises((ValueError,TypeError)):
                 self.prepare(target,qty)
 
+    def test_observer_provider_wait_does_not_hold_entry_mutation_lock(self):
+        from threading import Event,Thread
+        self.enter();self.quote(seconds=1)
+        started=Event();release=Event();errors=[]
+        original=self.client.full_chain.side_effect
+        def delayed(*args):
+            started.set()
+            if not release.wait(3):raise RuntimeError('TEST_TIMEOUT')
+            return original(*args)
+        self.client.full_chain.side_effect=delayed
+        def observe():
+            try:self.service.observe()
+            except Exception as error:errors.append(error)
+        worker=Thread(target=observe);worker.start()
+        try:
+            self.assertTrue(started.wait(2))
+            acquired=self.service.lock.acquire(timeout=.2)
+            if acquired:self.service.lock.release()
+            self.assertTrue(acquired,'Provider wait blocked the entry mutation lock')
+        finally:release.set();worker.join(4)
+        self.assertFalse(worker.is_alive());self.assertEqual(errors,[])
+
+    def test_cancellation_during_quote_lookup_is_rechecked_before_matching(self):
+        key=self.enter();self.quote(seconds=1)
+        original=self.client.full_chain.side_effect
+        def cancel_during_lookup(*args):
+            row=self.engine.ledger.order(key)
+            with self.service.lock:
+                self.engine.broker.acknowledge_cancel(row['broker_id'])
+                self.service._reconcile(self.now)
+            return original(*args)
+        self.client.full_chain.side_effect=cancel_during_lookup
+        self.service.observe()
+        self.assertEqual(self.engine.ledger.order(key)['status'],'CANCELED')
+        self.assertEqual(self.service.positions(),[])
+
+    def test_quote_failure_does_not_skip_healthy_position_stop(self):
+        self.filled();self.quote(bid=1.6,ask=1.65,seconds=2)
+        positions=self.service.positions()
+        unavailable=dict(positions[0],symbol='UNAVAILABLE',contract='UNAVAILABLE')
+        original=self.service._observation_market
+        def quotes(symbol,contract,**kwargs):
+            if symbol=='UNAVAILABLE':raise ManualDataError('MARKET_DATA_UNAVAILABLE')
+            return original(symbol,contract,**kwargs)
+        with patch.object(self.service,'positions',return_value=[unavailable,*positions]),\
+             patch.object(self.service,'_observation_market',side_effect=quotes):
+            with self.assertRaisesRegex(ManualDataError,'MARKET_DATA_UNAVAILABLE'):
+                self.service.observe()
+        exits=[r for r in self.engine.ledger.orders() if r['order']['instruction']=='SELL_TO_CLOSE']
+        self.assertEqual(len(exits),1);self.assertEqual(exits[0]['order']['exit_reason'],'LOSS_LIMIT')
+
     def test_owner_binding_then_single_use_across_service_restart(self):
         r=self.prepare()
         with self.assertRaisesRegex(ExecutionBlocked,'REVIEW_NOT_FOUND'):

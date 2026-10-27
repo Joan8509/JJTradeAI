@@ -48,7 +48,7 @@ class TickGeometryTests(unittest.TestCase):
         from bollinger_tick_stream import record_ingest_revision
         record_ingest_revision(self.database)
         receipt=json.loads((self.database.parent/'trade_review/ingest_runtime/loaded.json').read_text())
-        self.assertEqual(receipt['minimum_band_expansion_pct'],1)
+        self.assertEqual(receipt['minimum_band_expansion_pct'],3)
         self.assertEqual(receipt['sqlite_version'],sqlite3.sqlite_version)
         self.assertEqual(len(receipt['expansion_source_sha256']),64)
         self.assertEqual(len(receipt['detector_source_sha256']),64)
@@ -64,15 +64,15 @@ class TickGeometryTests(unittest.TestCase):
             u,l=bands_at_open(prior[1:],price)
             if price>u and u>pu and l<pl:
                 minimum=100*min(u-pu,pl-l)/(pu-pl)
-                if minimum<1:weak=price
+                if minimum<3:weak=price
                 elif weak is not None:strong=price;break
         self.assertIsNotNone(weak);self.assertIsNotNone(strong)
         snapshot,reason=self.observe(weak,2,2)
         self.assertIsNone(snapshot['signal']);self.assertEqual(reason,'READY_NO_EXIT')
         snapshot,reason=self.observe(strong,3,3)
         self.assertEqual(reason,'EXIT')
-        self.assertEqual(snapshot['signal']['band_expansion']['required_pct'],1)
-        self.assertGreaterEqual(snapshot['signal']['band_expansion']['minimum_pct'],1)
+        self.assertEqual(snapshot['signal']['band_expansion']['required_pct'],3)
+        self.assertGreaterEqual(snapshot['signal']['band_expansion']['minimum_pct'],3)
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -135,6 +135,16 @@ class TickGeometryTests(unittest.TestCase):
         self.observe(100.,3,3)
         self.assertIsNotNone(self.observe(104.,4,4)[0]['signal'])
         self.assertIsNone(self.observe(100.,5,5)[0]['signal'])
+
+    def test_true_opening_outside_initial_bands_can_enter_current_bands_live(self):
+        self.observe(104.,1,1)
+        snapshot,reason=self.observe(110.,2,2)
+        self.assertEqual(reason,'EXIT')
+        g=snapshot['geometry']
+        self.assertEqual(snapshot['opening'],104.)
+        self.assertGreater(g['opening'],g['initial_opening_upper'])
+        self.assertLessEqual(g['opening'],g['upper'])
+        self.assertEqual(g['opening_reference'],'CURRENT_BANDS')
 
     def test_previous_exposure_allows_only_new_inside_opening(self):
         for previous,price,side in ((103.,105.,'SUPERIOR'),(97.,95.,'INFERIOR')):

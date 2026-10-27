@@ -143,11 +143,25 @@ def manual_candidates(state,market,symbol,side,now):
     return tick,expiry,tuple(by_symbol[q.symbol] for q in quotes)
 
 
+MARKET_CACHE_REVISION='nonblocking_market_cache_v1'
+
+
 class ManualMarketData:
     """One shared REST client/cache. No accounts/positions/orders calls here."""
     def __init__(self,client,*,verified_increments=None,fee_per_contract=None,direct_quotes=False):
         self.client=client;self.increments=verified_increments or {};self.fee_per_contract=fee_per_contract
         self.lock=Lock();self.cache={};self.retry_at=None;self.catalog_cache={};self.direct_quotes=direct_quotes;self.selected_cache={}
+
+    def _record_retry(self, now, error):
+        retry=aware(now)+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
+        with self.lock:
+            if self.retry_at is None or retry>self.retry_at:self.retry_at=retry
+
+    @staticmethod
+    def _publish(cache, key, result):
+        """Under cache lock; an older in-flight response cannot roll back data."""
+        current=cache.get(key)
+        if current is None or current.fetched_at<=result.fetched_at:cache[key]=result
 
     def _recent_entry_catalog(self, symbol, side, contract_symbol, now):
         """Called under lock; reuse only sub-second option AND spot evidence.
@@ -190,16 +204,48 @@ class ManualMarketData:
                 old=self.catalog_cache.get((symbol,side,expiry))
                 if old and timedelta(0)<=aware(now)-old.fetched_at<timedelta(seconds=5):return old
                 if timedelta(0)<=aware(now)-complete.fetched_at<timedelta(seconds=5):return complete
-                try:
-                    raw=self.client.chain(symbol,side,expiry,expiry,now)
-                    partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
-                except Exception as error:
-                    self.retry_at=aware(now)+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
-                    raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
-                result=ManualChain(symbol,side,complete.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
-                self.catalog_cache[(symbol,side,expiry)]=result
+        if use_full:return self.get_chain(symbol,side,now,force=True)
+        try:
+            raw=self.client.chain(symbol,side,expiry,expiry,now)
+            partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
+        except Exception as error:
+            self._record_retry(now,error)
+            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+        result=ManualChain(symbol,side,complete.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
+        with self.lock:self._publish(self.catalog_cache,(symbol,side,expiry),result)
+        return result
+
+    def prepare_calendar(self,symbol,side,now):
+        """Background metadata lookup; network never holds the trading cache lock.
+
+        Complete calendars keep their existing five-minute lifetime. Publication
+        never overwrites a newer foreground response. Quotes retain their real
+        provider timestamps and still require the normal entry validation.
+        """
+        if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
+            raise ManualDataError('OPTION_SEARCH_INVALID')
+        if self.direct_quotes is not True:raise ManualDataError('OPTION_SEARCH_INVALID')
+        now=aware(now)
+        with self.lock:
+            if self.retry_at is not None and now<self.retry_at:
+                raise ManualDataError('MARKET_DATA_COOLDOWN')
+            old=self.cache.get((symbol,side))
+            if old and timedelta(0)<=now-old.fetched_at<timedelta(minutes=4):return old
+        try:
+            raw=self.client.full_chain(symbol,side,now)
+            result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
+            select_entry_expiration(result.expirations,now)
+        except Exception as error:
+            retry=now+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
+            with self.lock:
+                if self.retry_at is None or retry>self.retry_at:self.retry_at=retry
+            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+        with self.lock:
+            current=self.cache.get((symbol,side))
+            if current is None or current.fetched_at<result.fetched_at:
+                self.cache[(symbol,side)]=result
                 return result
-        return self.get_chain(symbol,side,now,force=True)
+            return current
 
     def get_chain(self,symbol,side,now,*,force=False):
         if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
@@ -209,18 +255,17 @@ class ManualMarketData:
                 raise ManualDataError('MARKET_DATA_COOLDOWN')
             old=self.cache.get((symbol,side))
             if not force and old and timedelta(0)<=aware(now)-old.fetched_at<timedelta(seconds=5):return old
-            try:
-                raw=self.client.full_chain(symbol,side,now)
-                result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
-            except Exception as error:
-                delay=max(15,getattr(error,'retry_after_seconds',None) or 0)
-                self.retry_at=aware(now)+timedelta(seconds=delay)
-                allowed={'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
-                         'TRANSPORT_FAILURE','HTTP_FAILURE'}
-                code=error.code if isinstance(error,SchwabError) and error.code in allowed else 'MARKET_DATA_UNAVAILABLE'
-                raise ManualDataError(code) from None
-            self.cache[(symbol,side)]=result
-            return result
+        try:
+            raw=self.client.full_chain(symbol,side,now)
+            result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
+        except Exception as error:
+            self._record_retry(now,error)
+            allowed={'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
+                     'TRANSPORT_FAILURE','HTTP_FAILURE'}
+            code=error.code if isinstance(error,SchwabError) and error.code in allowed else 'MARKET_DATA_UNAVAILABLE'
+            raise ManualDataError(code) from None
+        with self.lock:self._publish(self.cache,(symbol,side),result)
+        return result
 
     def get_entry_chain(self,symbol,side,contract_symbol,now,*,force=True):
         """Refresh the selected expiry, retaining a recently complete calendar.
@@ -262,22 +307,23 @@ class ManualMarketData:
                         if selected is not None:break
                 if selected is None:raise ManualDataError('CONTRACT_NO_LONGER_ELIGIBLE')
                 if self.retry_at is not None and aware(now)<self.retry_at:raise ManualDataError('MARKET_DATA_COOLDOWN')
-                try:
-                    expiry=selected.snapshot.expiration
-                    if self.direct_quotes:
-                        from selected_option_quotes import refresh_selected
-                        payload=self.client.quotes([symbol,contract_symbol],now)
-                        result=refresh_selected(old,contract_symbol,payload,aware(now))
-                        self.catalog_cache[(symbol,side,expiry)]=result
-                        self.selected_cache[(symbol,side,contract_symbol)]=result
-                        return result
-                    raw=self.client.chain(symbol,side,expiry,expiry,now)
-                    partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
-                except Exception as error:
-                    self.retry_at=aware(now)+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
-                    raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
-                return ManualChain(symbol,side,old.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
         if use_full:return self.get_chain(symbol,side,now,force=True)
+        try:
+            expiry=selected.snapshot.expiration
+            if self.direct_quotes:
+                from selected_option_quotes import refresh_selected
+                payload=self.client.quotes([symbol,contract_symbol],now)
+                result=refresh_selected(old,contract_symbol,payload,aware(now))
+                with self.lock:
+                    self._publish(self.catalog_cache,(symbol,side,expiry),result)
+                    self._publish(self.selected_cache,(symbol,side,contract_symbol),result)
+                return result
+            raw=self.client.chain(symbol,side,expiry,expiry,now)
+            partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
+        except Exception as error:
+            self._record_retry(now,error)
+            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+        return ManualChain(symbol,side,old.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
 
 
 def owner_market_data():

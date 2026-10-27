@@ -85,7 +85,12 @@ class EntryDiagnosticsTests(unittest.TestCase):
             result=direct(symbols,now);result[symbols[1]]['quote'].update(bidPrice=2.35,askPrice=2.4)
             return result
         h.f.client.quotes.side_effect=changed
+        # Force the selected GET: an otherwise usable sub-second catalog is
+        # deliberately reused in production and would never call this stub.
+        h.f.payload['callExpDateMap']['2026-10-23:7']['100.0'][0]['quoteTimeInLong']-=2000
+        h.f.payload['underlying']['quoteTime']-=2000
         h.arm();h.runner.step()
+        h.f.client.quotes.assert_called_once()
         rows=h.store.read("SELECT stage,details_json FROM queue_decisions WHERE stage IN ('CATALOG_RESULT','ENTRY_REFRESH_RESULT') ORDER BY id")
         import json
         self.assertGreater(json.loads(rows[0]['details_json'])['eligible'],0)

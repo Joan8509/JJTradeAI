@@ -39,7 +39,8 @@ def render_dashboard_home(*, show_header=True):
     if st.session_state.get('jj_home_tab')!=label:st.session_state['jj_home_tab']=label
     for legacy in ('automaticas','resultados'):
         if legacy in st.query_params:del st.query_params[legacy]
-    st.query_params['vista']=desired
+    if st.query_params.get('vista')!=desired:
+        st.query_params['vista']=desired
     def changed():
         st.query_params['vista']=SLUGS[TABS.index(st.session_state['jj_home_tab'])]
     with st.container(key='jj_home_nav'):

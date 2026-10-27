@@ -141,7 +141,10 @@ class SignalReferenceLatencyTests(unittest.TestCase):
         import bollinger_tick_stream
         record_ingest_revision(self.database)
         receipt=json.loads((self.database.parent/'trade_review/ingest_runtime/loaded.json').read_text())
-        self.assertEqual(set(receipt),{'utc','pid','revision','source_sha256','sqlite_version'})
+        self.assertEqual(set(receipt),{'utc','pid','revision','source_sha256','sqlite_version',
+            'strategy_version','expansion_source_sha256','minimum_band_expansion_pct','detector_source_sha256'})
+        self.assertEqual(receipt['strategy_version'],bollinger_tick_stream.STRATEGY_VERSION)
+        self.assertEqual(receipt['minimum_band_expansion_pct'],3)
         self.assertEqual(receipt['sqlite_version'],sqlite3.sqlite_version)
         self.assertEqual(receipt['pid'],os.getpid())
         self.assertEqual(receipt['source_sha256'],hashlib.sha256(Path(bollinger_tick_stream.__file__).read_bytes()).hexdigest())

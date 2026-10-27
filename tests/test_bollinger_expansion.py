@@ -1,8 +1,14 @@
 import unittest
-from bollinger_expansion import measure_band_expansion
+from bollinger_expansion import measure_band_expansion, MINIMUM_BAND_EXPANSION_PCT
 
 
 class BandExpansionTests(unittest.TestCase):
+    def test_authorized_three_percent_each_band_inclusive(self):
+        self.assertEqual(MINIMUM_BAND_EXPANSION_PCT,3)
+        self.assertTrue(measure_band_expansion(203,97,200,100).meets(MINIMUM_BAND_EXPANSION_PCT))
+        self.assertFalse(measure_band_expansion(202.99,90,200,100).meets(MINIMUM_BAND_EXPANSION_PCT))
+        self.assertFalse(measure_band_expansion(210,97.01,200,100).meets(MINIMUM_BAND_EXPANSION_PCT))
+
     def test_each_band_not_total_width_must_expand(self):
         self.assertFalse(measure_band_expansion(113, 91, 110, 90).meets(0))
         self.assertFalse(measure_band_expansion(113, 90, 110, 90).meets(0))

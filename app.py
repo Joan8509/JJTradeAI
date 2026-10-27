@@ -1,7 +1,6 @@
 """Interfaz local de decisión asistida para JJTrade AI."""
 
 from collections.abc import Mapping, Sequence
-import base64
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 import html
@@ -1344,12 +1343,15 @@ def _render_price_ranges() -> None:
 
 @st.cache_data(show_spinner=False)
 def _dashboard_background_data_uri() -> str:
-    """Incrusta el fondo para que funcione igual en localhost y Tailscale."""
+    """Reuse the static asset instead of resending two base64 copies per rerun.
+
+    A relative URL follows the current HTTPS origin (including Tailscale).
+    Static serving is enabled in .streamlit/config.toml.
+    """
     image_path = Path(__file__).resolve().parent / "static" / "trading-bull-candles-bg.png"
     if not image_path.exists():
         return ""
-    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    return "app/static/trading-bull-candles-bg.png"
 
 
 def _bollinger_state_is_current(item, *, now, market_open):

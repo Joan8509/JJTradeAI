@@ -308,12 +308,16 @@ class QueueDashboardTests(unittest.TestCase):
         start=datetime.fromisoformat(day+'T09:30:00').replace(tzinfo=ZoneInfo('America/New_York'))
         end=start.replace(hour=16,minute=0)
         sessions=[(day,start.isoformat(),end.isoformat())]
+        connection=lambda:dict(state='CONNECTED',checked_at=datetime.now(timezone.utc).isoformat())
         with patch('automatic_entry_panel.queue_store',return_value=h.store),\
              patch('automatic_entry_panel.official_sessions',return_value=sessions),\
+             patch('automatic_entry_panel.queue_connection',side_effect=connection),\
+             patch('automatic_entry_panel.probe_queue_connection',side_effect=connection),\
              patch('automatic_entry_panel.read_manual_state',return_value={'tick':{}}):
             app=AppTest.from_string('from automatic_entry_panel import render_automatic_entry_panel\nrender_automatic_entry_panel()').run(timeout=15)
             self.assertEqual(len(app.exception),0)
             self.assertEqual(h.store.plans(),[])
+            app.radio(key='auto_queue_mode').set_value('Una compañía').run(timeout=15)
             app.selectbox(key='auto_queue_symbol').select('AMZN').run(timeout=15)
             self.assertEqual(app.number_input(key='auto_queue_quantity').value,0)
             app.selectbox(key='auto_queue_target').select('35').run(timeout=15)

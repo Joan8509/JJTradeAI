@@ -1,6 +1,6 @@
 ticker;optimal_low;optimal_high;minimum;maximum;analysis_date;block;sector;industry;exchange;name
 AMZN;140;230;130;240;2026-05-19;TECHNOLOGY;Consumer Cyclical;Internet Retail;NASD;Amazon.com Inc.
-AAPL;35;90;30;100;2026-05-19;TECHNOLOGY;Technology;Consumer Electronics;NASD;Apple Inc.
+AAPL;45;95;40;100;2026-09-01;TECHNOLOGY;Technology;Consumer Electronics;NASD;Apple Inc.
 GOOG;60;170;50;170;2026-05-19;TECHNOLOGY;Communication Services;Internet Content & Information;NASD;Alphabet Inc.
 META;150;210;145;220;2026-05-19;TECHNOLOGY;Communication Services;Internet Content & Information;NASD;Meta Platforms Inc.
 MSFT;60;120;50;130;2026-05-19;TECHNOLOGY;Technology;Software - Infrastructure;NASD;Microsoft Corporation

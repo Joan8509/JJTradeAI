@@ -1,12 +1,12 @@
 """Measure each band's outward movement against the previous band width.
 
-The shared detector uses the explicitly authorized one-percent minimum.
+The shared detector uses the explicitly authorized three-percent minimum.
 This module never reads private configuration or emits signals.
 """
 from dataclasses import dataclass
 import math
 
-MINIMUM_BAND_EXPANSION_PCT = 1.0
+MINIMUM_BAND_EXPANSION_PCT = 3.0
 
 
 @dataclass(frozen=True)

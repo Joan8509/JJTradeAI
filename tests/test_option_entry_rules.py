@@ -44,7 +44,7 @@ class OptionEntryRulesTests(unittest.TestCase):
 
     def test_saved_company_intervals_preserved_and_missing_is_blocking(self):
         self.assertEqual(len(load_optimal_option_premiums()),53)
-        self.assertEqual(optimal_option_premium('AAPL'),(Decimal('.35'),Decimal('.90')))
+        self.assertEqual(optimal_option_premium('AAPL'),(Decimal('.45'),Decimal('.95')))
         self.assertEqual(optimal_option_premium('AMZN'),(Decimal('1.40'),Decimal('2.30')))
         with self.assertRaisesRegex(ValueError,'MISSING'):optimal_option_premium('NO_SUCH_SYMBOL')
 

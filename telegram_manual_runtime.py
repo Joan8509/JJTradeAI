@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
 from manual_execution import configured_workflow
-from manual_trade_service import owner_market_data,read_manual_state
+from observation_journal import ObservationJournal
+from manual_trade_service import owner_market_data,read_manual_state,MARKET_CACHE_REVISION
 from market_store import DEFAULT_MARKET_DATABASE
 from schwab_connection import EncryptedSchwabStore
 from telegram_manual import TelegramManualService,TelegramManualStore
@@ -20,11 +22,13 @@ from telegram_manual_bot import TelegramManualBot,TelegramCallbackPoller
 from telegram_manual_http import LoopbackServer,handler_for
 from trade_close_notifications import SaleNotifier,SaleNoticeStore
 from zoneinfo import ZoneInfo
+from bollinger_phone_worker import STRATEGY_VERSION
+from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT
 
 ROOT=Path(__file__).resolve().parent
 PORT=8184
 ENTRY_POLL_SECONDS=.2
-ENTRY_LATENCY_REVISION='fresh_signal_priority_v1'
+ENTRY_LATENCY_REVISION='nonblocking_entry_metadata_v1'
 
 
 def _status(state,**fields):
@@ -63,6 +67,7 @@ class Companion:
         self.poll_transport_backoff=5
         self.monitor_ready=False;self.monitor_at=None
         self.monitor_wake=threading.Event()
+        self.notice_wake=threading.Event()
         service.workflow.observation_requested=self.monitor_wake
         self.notifier=notifier;self.notice_state='DISABLED' if notifier is None else 'WAITING'
         service.operational_check=self.ready
@@ -77,6 +82,8 @@ class Companion:
                 from queue_position_cards import PositionCardPublisher
                 self.position_publisher=PositionCardPublisher(service.workflow)
                 self.entry_queue=QueueRunner(service.workflow,QueueStore(),ready=self.monitor_active,service=service)
+                self.entry_queue.background_preparation=True
+                self.entry_queue.background_entry_auxiliary=True
                 self.queue_notifier=QueueNotifier(self.entry_queue.store,service,api)
         except Exception:
             pass  # Queue failure must never disable management of existing positions.
@@ -130,20 +137,46 @@ class Companion:
             # Clear before work: a registration during a slow observation must
             # remain signaled and run again without the idle one-second wait.
             self.monitor_wake.clear()
+            observation_started=time.monotonic();monitor_error_code=None
             try:
                 if self.service.workflow.pending_orders() or self.service.workflow.positions():
                     self.service.workflow.observe()
                 self.monitor_ready=True
-            except Exception:self.monitor_ready=False
+            except Exception as error:
+                self.monitor_ready=False
+                # Fixed allowlist only: never persist exception text, provider
+                # bodies, credential-bearing URLs, or private account details.
+                code=str(error)
+                monitor_error_code=code if code in {
+                    'MARKET_DATA_COOLDOWN','MARKET_DATA_UNAVAILABLE','EXIT_QUOTE_UNUSABLE',
+                    'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
+                    'TRANSPORT_FAILURE','HTTP_FAILURE','POSITION_RECONCILIATION_REQUIRED',
+                    'ENTRY_CANCELLATION_AND_RECONCILIATION_REQUIRED',
+                } else 'OBSERVATION_FAILED'
+            observation_ms=round((time.monotonic()-observation_started)*1000,3)
             self.monitor_at=datetime.now(timezone.utc)
             if self.position_publisher is not None:
                 try:self.position_publisher.publish(monitor_ready=self.monitor_ready)
                 except Exception:pass  # Display failure cannot disable exits or retry orders.
+            if self.monitor_ready:self.notice_wake.set()
             if self.stop.is_set():break
             state='READY' if self.ready() else 'MONITOR_BLOCKED' if not self.monitor_ready else 'BOT_NOT_READY'
             _status(state,port=PORT,monitor_ready=self.monitor_ready,sale_notices_state=self.notice_state,
                 automatic_entry_revision=ENTRY_LATENCY_REVISION,automatic_entry_poll_ms=int(ENTRY_POLL_SECONDS*1000),
                 automatic_entry_lifetime_seconds=10,entry_monitor_wakeup=True,
+                execution_notice_wakeup=True,
+                observation_revision='network_outside_workflow_lock_v1',
+                exit_observation_revision='fresh_pending_exit_quotes_v1',
+                exit_diagnostics_enabled=isinstance(getattr(self.service.workflow,'observation_journal',None),ObservationJournal),
+                entry_auxiliary_revision='background_entry_presentation_v1',
+                entry_auxiliary_enabled=bool(self.entry_queue is not None and self.entry_queue.background_entry_auxiliary),
+                entry_auxiliary_dropped=self.entry_queue.auxiliary_dropped if self.entry_queue is not None else 0,
+                entry_auxiliary_errors=self.entry_queue.auxiliary_errors if self.entry_queue is not None else 0,
+                market_cache_revision=MARKET_CACHE_REVISION,
+                observation_ms=observation_ms,monitor_error_code=monitor_error_code,
+                strategy_version=STRATEGY_VERSION,
+                minimum_band_expansion_pct=MINIMUM_BAND_EXPANSION_PCT,
+                background_catalog_preparation=bool(self.entry_queue is not None),
                 preopen_preparation_enabled=bool(self.entry_queue is not None and
                     getattr(self.service.workflow.market_data,'direct_quotes',False) is True),
                 stop_loss_pct=str(self.service.workflow.engine.policy.stop_loss_pct),
@@ -155,7 +188,9 @@ class Companion:
     def _notifications(self):
         # Telegram HTTP never blocks price observation or stop/target management.
         while not self.stop.is_set():
+            self.notice_wake.clear()
             delay=1
+            cooldown=False
             if self.monitor_ready:
                 try:
                     queue_delay=self.queue_notifier.pump() if self.queue_notifier is not None else 0
@@ -165,9 +200,20 @@ class Companion:
                     if result['unconfirmed']:self.notice_state='DELIVERY_UNCONFIRMED'
                     elif result['accepted'] or self.notice_state=='WAITING':self.notice_state='READY'
                     delay=max(1,result['retry_after_seconds'])
+                    cooldown=bool(result['retry_after_seconds'])
                 except Exception:
-                    self.notice_state='NOTICE_BLOCKED';delay=15
-            self.stop.wait(delay)
+                    self.notice_state='NOTICE_BLOCKED';delay=15;cooldown=True
+            if cooldown or not self.monitor_ready:self.stop.wait(delay)
+            else:self.notice_wake.wait(delay)
+
+    def _exit_diagnostics(self):
+        journal=self.service.workflow.observation_journal
+        while not self.stop.is_set():
+            try:journal.flush()
+            except Exception:pass
+            self.stop.wait(1)
+        try:journal.flush()
+        except Exception:pass
 
     def _entries(self):
         while not self.stop.is_set():
@@ -178,20 +224,36 @@ class Companion:
                 except Exception:pass
             self.stop.wait(0 if worked else ENTRY_POLL_SECONDS)
 
+    def _entry_auxiliary(self):
+        while not self.stop.is_set():
+            worked=self.entry_queue.drain_auxiliary()
+            self.stop.wait(0 if worked else .1)
+
+    def _prepare_catalogs(self):
+        # One bounded REST worker; never claims signals or touches broker orders.
+        while not self.stop.is_set():
+            try:
+                self.entry_queue.opening_preparation.step(
+                    self.entry_queue.store.active(),ready=self.monitor_active(),continuous=True)
+            except Exception:pass  # Warmup failure cannot stop entries/exits.
+            self.stop.wait(1)
+
     def start(self):
         try:
             if self.notifier is not None:self.notifier.arm()
         except Exception:
             self.server.server_close();raise
         targets=(self.server.serve_forever,self._poll,self._monitor)
-        if self.entry_queue is not None:targets+=(self._entries,)
+        if isinstance(getattr(self.service.workflow,'observation_journal',None),ObservationJournal):
+            targets+=(self._exit_diagnostics,)
+        if self.entry_queue is not None:targets+=(self._entries,self._prepare_catalogs,self._entry_auxiliary)
         if self.notifier is not None:targets+= (self._notifications,)
         for target in targets:
             thread=threading.Thread(target=target,daemon=True);thread.start();self.threads.append(thread)
         return self
 
     def close(self):
-        self.stop.set();self.monitor_wake.set();self.server.shutdown();self.server.server_close();_status('STOPPED')
+        self.stop.set();self.monitor_wake.set();self.notice_wake.set();self.server.shutdown();self.server.server_close();_status('STOPPED')
 
 
 def start_optional():

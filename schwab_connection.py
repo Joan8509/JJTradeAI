@@ -72,34 +72,37 @@ class SchwabTransport:
         with self.lock:
             self.sleeper(max(0.0, self.next_request-self.clock()))
             self.next_request = self.clock()+self.interval
-            request = Request(API+path+('?' + urlencode(params) if params else ''),
-                data=urlencode(form).encode() if form is not None else None,
-                headers=headers or {}, method=method)
-            failure = None
-            try:
-                with self.opener.open(request, timeout=15) as response:
-                    return json.load(response)
-            except HTTPError as error:
-                delay = None
-                if error.code == 429:
+        # Share request-start spacing and Retry-After, not the HTTP wait.
+        # A background chain response must not hold up live entry/exit quotes.
+        request = Request(API+path+('?' + urlencode(params) if params else ''),
+            data=urlencode(form).encode() if form is not None else None,
+            headers=headers or {}, method=method)
+        failure = None
+        try:
+            with self.opener.open(request, timeout=15) as response:
+                return json.load(response)
+        except HTTPError as error:
+            delay = None
+            if error.code == 429:
+                try:
+                    delay = max(1, int(error.headers.get('Retry-After', '60')))
+                except ValueError:
                     try:
-                        delay = max(1, int(error.headers.get('Retry-After', '60')))
-                    except ValueError:
-                        try:
-                            delay = max(1, int((parsedate_to_datetime(error.headers['Retry-After'])-
-                                datetime.now(UTC)).total_seconds())+1)
-                        except (ValueError, TypeError, KeyError):
-                            delay = 60
+                        delay = max(1, int((parsedate_to_datetime(error.headers['Retry-After'])-
+                            datetime.now(UTC)).total_seconds())+1)
+                    except (ValueError, TypeError, KeyError):
+                        delay = 60
+                with self.lock:
                     self.next_request = max(self.next_request, self.clock()+delay)
-                failure = SchwabError('REAUTHORIZATION_REQUIRED' if error.code == 401 or
-                    (path == '/v1/oauth/token' and error.code == 400) else
-                    'RATE_LIMITED' if error.code == 429 else 'HTTP_FAILURE',
-                    http_status=error.code, retry_after_seconds=delay)
-                error.close()
-            except Exception:
-                failure = SchwabError('TRANSPORT_FAILURE')
-            # Raise outside except: secret-bearing HTTP exceptions are not chained.
-            raise failure from None
+            failure = SchwabError('REAUTHORIZATION_REQUIRED' if error.code == 401 or
+                (path == '/v1/oauth/token' and error.code == 400) else
+                'RATE_LIMITED' if error.code == 429 else 'HTTP_FAILURE',
+                http_status=error.code, retry_after_seconds=delay)
+            error.close()
+        except Exception:
+            failure = SchwabError('TRANSPORT_FAILURE')
+        # Raise outside except: secret-bearing HTTP exceptions are not chained.
+        raise failure from None
 
 
 @dataclass(frozen=True)

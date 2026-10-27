@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 
 
 class BollingerPhoneTests(unittest.TestCase):
-    def test_authorized_one_percent_minimum_in_both_directions(self):
-        for price,mid,side in ((202,150.5,'SUPERIOR'), (98,149.5,'INFERIOR')):
-            args=(150,200,100,150,price,201,99,mid)
+    def test_authorized_three_percent_minimum_in_both_directions(self):
+        for price,mid,side in ((204,150.5,'SUPERIOR'), (96,149.5,'INFERIOR')):
+            args=(150,200,100,150,price,203,97,mid)
             self.assertEqual(detect_values(*args,opening=150),side)
-            for upper,lower in ((201,99.5),(200.5,99)):
+            for upper,lower in ((203,97.01),(202.99,97)):
                 weak=(*args[:5],upper,lower,mid)
                 self.assertIsNone(detect_values(*weak,opening=150))
 
@@ -27,8 +27,8 @@ class BollingerPhoneTests(unittest.TestCase):
 
     def test_signal_retains_numeric_expansion_without_changing_message_format(self):
         signal=detect_exit(self.frame())
-        self.assertEqual(signal['band_expansion']['required_pct'],1)
-        self.assertGreaterEqual(signal['band_expansion']['minimum_pct'],1)
+        self.assertEqual(signal['band_expansion']['required_pct'],3)
+        self.assertGreaterEqual(signal['band_expansion']['minimum_pct'],3)
         self.assertEqual(len(message_for('AAPL',signal,datetime.now(timezone.utc)).splitlines()),4)
 
     def test_legacy_notice_alias_blocks_new_source_after_restart(self):
@@ -111,11 +111,11 @@ class BollingerPhoneTests(unittest.TestCase):
         self.assertEqual(detect_values(100, 102, 98, 100, 96, 103, 97, 99.5,
                          opening=97.9, opening_upper=102.2, opening_lower=97.7), 'INFERIOR')
 
-    def test_jump_outside_opening_bands_remains_excluded(self):
+    def test_jump_still_outside_current_bands_remains_excluded(self):
         self.assertIsNone(detect_values(100, 102, 98, 100, 105, 104, 96, 100.5,
-                          opening=104, opening_upper=103, opening_lower=97))
+                          opening=104.01, opening_upper=103, opening_lower=97))
         self.assertIsNone(detect_values(100, 102, 98, 100, 95, 104, 96, 99.5,
-                          opening=96, opening_upper=103, opening_lower=97))
+                          opening=95.99, opening_upper=103, opening_lower=97))
 
     def test_exposure_without_both_bands_opening_is_not_this_strategy(self):
         for side in ('SUPERIOR','INFERIOR'):
@@ -170,8 +170,8 @@ class BollingerPhoneTests(unittest.TestCase):
         self.assertIn("Apple",lines[0])
         self.assertEqual(lines[1],"Salida: superior")
         self.assertIn("10:15 AM ET",lines[2])
-        self.assertIn("$35",lines[3])
-        self.assertIn("$90",lines[3])
+        self.assertIn("$45",lines[3])
+        self.assertIn("$95",lines[3])
         self.assertNotIn("Medias",text)
         signal['side']='INFERIOR'
         self.assertIn('Salida: inferior',message_for('AAPL',signal,datetime(2026,10,8,14,16,tzinfo=timezone.utc)))
@@ -219,8 +219,8 @@ class BollingerPhoneTests(unittest.TestCase):
                     self.assertEqual(db.execute("SELECT COUNT(*) FROM bollinger_live_events").fetchone()[0], 2)
                     import json
                     events=[json.loads(row[0]) for row in db.execute('SELECT payload_json FROM bollinger_live_events')]
-                    self.assertTrue(all(event['band_expansion']['required_pct']==1 for event in events))
-                    self.assertTrue(all(event['band_expansion']['minimum_pct']>=1 for event in events))
+                    self.assertTrue(all(event['band_expansion']['required_pct']==3 for event in events))
+                    self.assertTrue(all(event['band_expansion']['minimum_pct']>=3 for event in events))
                     timing=db.execute('SELECT send_started_at,telegram_message_at,state FROM bollinger_notice_timing').fetchall()
                     self.assertEqual(timing,[(now.isoformat(),now.isoformat(),'ENVIADO')])
                 db.close()

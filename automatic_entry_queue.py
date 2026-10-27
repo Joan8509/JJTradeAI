@@ -11,6 +11,7 @@ import os
 import secrets
 import sqlite3
 import time
+from queue import Queue,Empty,Full
 from urllib.parse import urlsplit,urlunsplit
 from zoneinfo import ZoneInfo
 
@@ -141,12 +142,93 @@ class QueueStore(_IsolatedDatabase):
         return self.read("SELECT * FROM queue_plans WHERE state='ARMED' AND NOT EXISTS "
             "(SELECT 1 FROM queue_control WHERE id=1 AND maintenance=1) ORDER BY armed_at,id")
 
+    def archive_unexecuted_uncertain(self,identity,*,now,ledger_path=None,broker_path=None):
+        """Retire an expired local attempt only after proving no order exists.
+
+        Keep UNCERTAIN and its durable claim unchanged. This is an explicit
+        user cleanup, never reconciliation that permits another submission.
+        """
+        now=aware(now)
+        with self.transaction() as db:
+            if db.execute('SELECT 1 FROM queue_archives WHERE plan_id=?',(identity,)).fetchone():return
+            raw=db.execute('SELECT * FROM queue_plans WHERE id=?',(identity,)).fetchone()
+            if not raw:raise ExecutionBlocked('QUEUE_OPERATION_NOT_SETTLED')
+            plan=dict(raw)
+            if (plan['state']!='UNCERTAIN' or plan['client_key'] is not None or
+                    now<aware(datetime.fromisoformat(plan['closes_at']))+timedelta(minutes=1)):
+                raise ExecutionBlocked('QUEUE_OPERATION_NOT_SETTLED')
+            attempts=db.execute('SELECT * FROM queue_attempts WHERE plan_id=?',(identity,)).fetchall()
+            if (len(attempts)!=1 or attempts[0]['state']!='UNCERTAIN' or attempts[0]['client_key'] is not None
+                    or attempts[0]['notice_state']!='WAITING' or
+                    aware(datetime.fromisoformat(attempts[0]['claimed_at']))>=now-timedelta(minutes=1)):
+                raise ExecutionBlocked('QUEUE_OPERATION_NOT_SETTLED')
+            key=digest([ManualPracticePolicy.account_alias,attempts[0]['signal_key']])
+            ledger=Path(ledger_path or LEDGER_PATH).resolve()
+            broker=Path(broker_path or ledger.with_name('broker.db')).resolve()
+            if len({self.path.resolve(),ledger,broker})!=3:
+                raise ExecutionBlocked('QUEUE_OPERATION_NOT_SETTLED')
+            try:
+                for path,purpose,table in ((ledger,'JJTRADE_SIMULATION_LEDGER_V1','simulated_orders'),
+                                          (broker,'JJTRADE_LOCAL_PAPER_BROKER_V1','paper_orders')):
+                    with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=0)) as source:
+                        source.row_factory=sqlite3.Row;source.execute('PRAGMA query_only=ON');source.execute('BEGIN')
+                        started=time.monotonic();source.set_progress_handler(lambda:time.monotonic()-started>1,1000)
+                        identity_row=source.execute('SELECT purpose FROM simulation_identity').fetchone()
+                        if not identity_row or identity_row[0]!=purpose:raise ValueError
+                        if source.execute(f'SELECT 1 FROM {table} WHERE client_key=?',(key,)).fetchone():raise ValueError
+                        orders=source.execute(f'SELECT status,payload FROM {table} LIMIT 5001').fetchall()
+                        if len(orders)>5000:raise ValueError
+                        for order in orders:
+                            payload=json.loads(order['payload'])
+                            if payload.get('mode')!='LOCAL_SIMULATION' or payload.get('account_alias')!=ManualPracticePolicy.account_alias:
+                                raise ValueError
+                            if payload.get('underlying')==plan['symbol'] and order['status'] in ('SUBMITTING','UNKNOWN','WORKING','PARTIALLY_FILLED'):
+                                raise ValueError
+                        if table=='simulated_orders':
+                            settings=source.execute("SELECT value FROM simulation_settings WHERE key='reconciliation_blocked'").fetchone()
+                            if not settings or settings[0]!='0':raise ValueError
+                            positions,_=SimulationLedger._portfolio(source)
+                            if any(p['symbol']==plan['symbol'] for p in positions.values()):raise ValueError
+            except (OSError,sqlite3.Error,ValueError,KeyError,TypeError,ExecutionBlocked):
+                raise ExecutionBlocked('QUEUE_OPERATION_NOT_SETTLED') from None
+            db.execute('INSERT INTO queue_archives VALUES(?,?,?)',(identity,now.isoformat(),'UNCERTAIN'))
+            db.execute('INSERT INTO queue_decisions(plan_id,at,stage,reason,details_json) VALUES(?,?,?,?,?)',
+                (identity,now.isoformat(),'ARCHIVED_AFTER_NO_ORDER_CHECK','NO_LOCAL_ORDER_FOUND',
+                 encoded(dict(ledger_checked=True,broker_checked=True,claim_preserved=True,retry_enabled=False))))
+
     def maintenance(self):
         return self.read('SELECT maintenance FROM queue_control WHERE id=1')[0]['maintenance']==1
 
     def arm(self, symbol, quantity, target, session_date, *, now, sessions, baseline=None, symbols=None):
+        return self.arm_many([dict(symbol=symbol,quantity=quantity,target=target,baseline=baseline)],
+            session_date,now=now,sessions=sessions,symbols=symbols)[0]
+
+    def arm_many(self, selections, session_date, *, now, sessions, symbols=None):
+        """One explicit batch authorization, all rows or none; no dispatch here."""
+        allowed=watched_symbols() if symbols is None else symbols
+        if not selections or len(selections)>len(allowed):
+            raise ValueError('QUEUE_SELECTION_INVALID')
+        seen=set();rows=[]
+        for selection in selections:
+            symbol=selection['symbol']
+            if symbol in seen:raise ValueError('QUEUE_SELECTION_INVALID')
+            seen.add(symbol)
+            rows.append(self._arm_values(symbol,selection['quantity'],selection['target'],session_date,
+                now=now,sessions=sessions,baseline=selection.get('baseline'),symbols=allowed))
+        with self.transaction() as db:
+            if db.execute('SELECT maintenance FROM queue_control WHERE id=1').fetchone()[0]:
+                raise ValueError('QUEUE_MAINTENANCE')
+            for values in rows:
+                if db.execute("SELECT 1 FROM queue_plans WHERE symbol=? AND session_date=? AND state IN ('ARMED','DISPATCHING','UNCERTAIN')",
+                        (values[1],session_date)).fetchone():
+                    raise ValueError('QUEUE_ALREADY_ARMED_OR_UNCERTAIN')
+                db.execute('INSERT INTO queue_plans VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',values)
+        return [values[0] for values in rows]
+
+    @staticmethod
+    def _arm_values(symbol, quantity, target, session_date, *, now, sessions, baseline, symbols):
         positive_int(quantity)
-        if target not in TARGETS or symbol not in (watched_symbols() if symbols is None else symbols):
+        if target not in TARGETS or symbol not in symbols:
             raise ValueError('QUEUE_SELECTION_INVALID')
         low, high = optimal_option_premium(symbol)
         session = next((s for s in sessions if s[0] == session_date), None)
@@ -157,14 +239,7 @@ class QueueStore(_IsolatedDatabase):
         identity = secrets.token_hex(12)
         values = (identity, symbol, *session, quantity, target, str(low), str(high), format(high*100*quantity,'.2f'),
             aware(now).isoformat(), baseline, 'ARMED', 'WAITING_NEW_SIGNAL', None, None, aware(now).isoformat())
-        with self.transaction() as db:
-            if db.execute('SELECT maintenance FROM queue_control WHERE id=1').fetchone()[0]:
-                raise ValueError('QUEUE_MAINTENANCE')
-            if db.execute("SELECT 1 FROM queue_plans WHERE symbol=? AND session_date=? AND state IN ('ARMED','DISPATCHING','UNCERTAIN')",
-                    (symbol, session_date)).fetchone():
-                raise ValueError('QUEUE_ALREADY_ARMED_OR_UNCERTAIN')
-            db.execute('INSERT INTO queue_plans VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', values)
-        return identity
+        return values
 
     def pause(self, identity=None):
         # Pausing does not cancel pending orders, close positions or disable exits.
@@ -179,16 +254,36 @@ class QueueStore(_IsolatedDatabase):
         return rows[0]['state']
 
     def heartbeat(self, now, state):
-        with self.transaction() as db:
-            db.execute('INSERT OR REPLACE INTO queue_runtime VALUES(1,?,?,?)', (aware(now).isoformat(), os.getpid(), state))
+        previous=getattr(self,'_last_heartbeat',None)
+        if previous and previous[1]==state and timedelta(0)<=aware(now)-previous[0]<timedelta(seconds=1):
+            return True
+        # Display liveness must not wait behind a user editing the queue.
+        # Critical claims still use the unchanged durable transaction().
+        try:
+            with closing(sqlite3.connect(self.path,timeout=0)) as db:
+                db.execute('INSERT OR REPLACE INTO queue_runtime VALUES(1,?,?,?)', (aware(now).isoformat(), os.getpid(), state))
+                db.commit()
+            self._last_heartbeat=(aware(now),state)
+            return True
+        except (sqlite3.Error,OSError):return False
 
     def waiting(self, identity, reason, now):
-        with self.transaction() as db:
-            changed=db.execute("UPDATE queue_plans SET reason=?,updated_at=? WHERE id=? AND state='ARMED' AND reason IS NOT ?",
-                (reason, aware(now).isoformat(), identity, reason))
-            if changed.rowcount:
-                db.execute('INSERT INTO queue_decisions(plan_id,at,stage,reason,details_json) VALUES(?,?,?,?,?)',
-                    (identity,aware(now).isoformat(),'WAITING',reason,'{}'))
+        # An unchanged reason needs no writer lock. A changed display reason is
+        # best effort: defer on contention rather than delaying another symbol.
+        try:
+            with closing(sqlite3.connect(self.path,timeout=0)) as db:
+                row=db.execute('SELECT state,reason FROM queue_plans WHERE id=?',(identity,)).fetchone()
+                if not row or row[0]!='ARMED' or row[1]==reason:return False
+                db.execute('PRAGMA foreign_keys=ON')
+                db.execute('BEGIN IMMEDIATE')
+                changed=db.execute("UPDATE queue_plans SET reason=?,updated_at=? WHERE id=? AND state='ARMED' AND reason IS NOT ?",
+                    (reason, aware(now).isoformat(), identity, reason))
+                if changed.rowcount:
+                    db.execute('INSERT INTO queue_decisions(plan_id,at,stage,reason,details_json) VALUES(?,?,?,?,?)',
+                        (identity,aware(now).isoformat(),'WAITING',reason,'{}'))
+                db.commit()
+                return bool(changed.rowcount)
+        except (sqlite3.Error,OSError):return False
 
     def decision(self, identity, stage, now, *, reason=None, details=None):
         # Allowlisted callers supply fixed codes and market measurements only.
@@ -228,6 +323,9 @@ class QueueRunner:
             raise ValueError('ISOLATED_QUEUE_REQUIRED')
         self.workflow = workflow; self.store = store; self.ready = ready; self.service = service
         self.cooldown = {}; self.cursor = 0; self.last_attempted_signal = {}
+        self.background_entry_auxiliary=False
+        self.auxiliary_jobs=Queue(maxsize=64)
+        self.auxiliary_dropped=0;self.auxiliary_errors=0
         self.opening_preparation=OpeningPreparation(workflow,store)
         # Existing EXIT at worker startup is not a new trigger. No catch-up after
         # disconnect/restart. Future plans survive, but no old signals are replayed.
@@ -293,7 +391,10 @@ class QueueRunner:
                     self.cooldown[plan['id']]=self.workflow.clock()+timedelta(seconds=.2)
             self.store.heartbeat(self.workflow.clock(), 'READY' if self.ready() else 'MONITOR_NOT_READY')
             return True  # Drain ready work without an artificial post-lookup sleep.
-        self.opening_preparation.step(plans[offset:]+plans[:offset],ready=ready)
+        # Production warmup runs on its own worker. Never put network warmup
+        # back into the signal-to-order path, even when this scan is idle.
+        if not getattr(self,'background_preparation',False):
+            self.opening_preparation.step(plans[offset:]+plans[:offset],ready=ready)
 
     def _signal(self, plan, state, now):
         tick = current_manual_signal(state, plan['symbol'], now)
@@ -320,12 +421,8 @@ class QueueRunner:
         checked=w.clock()
         # Diagnostic only: evaluate before checking whether the live signal
         # changed while REST was in flight, so slow responses remain auditable.
-        try:
-            from queue_entry_diagnostics import catalog_check
-            details=catalog_check(market,symbol,side,checked)
-            details['lookup_ms']=round((time.monotonic()-lookup_started)*1000,3)
-            self.store.decision(plan['id'],'CATALOG_RESULT',checked,details=details)
-        except Exception:pass  # Optional explanation must never veto a valid entry.
+        self._catalog_diagnostic(plan,'CATALOG_RESULT',market,checked,
+            lookup_ms=round((time.monotonic()-lookup_started)*1000,3))
         state = w.read_state(symbol); now = w.clock()
         signal = self._signal(plan, state, now)
         if signal['key'] != original['key']:
@@ -341,16 +438,13 @@ class QueueRunner:
         refresh_started=time.monotonic()
         catalog=market
         market = w.market_data.get_entry_chain(symbol, side, chosen, w.clock(),force=False)
-        try:
-            from queue_entry_diagnostics import catalog_check
-            details=catalog_check(market,symbol,side,w.clock())
-            details['lookup_ms']=round((time.monotonic()-refresh_started)*1000,3)
-            details['catalog_reused']=market is catalog
-            self.store.decision(plan['id'],'ENTRY_REFRESH_RESULT',w.clock(),details=details)
-        except Exception:pass
+        self._catalog_diagnostic(plan,'ENTRY_REFRESH_RESULT',market,w.clock(),
+            lookup_ms=round((time.monotonic()-refresh_started)*1000,3),catalog_reused=market is catalog)
         # Do all network access before the workflow/queue dispatch locks. Pausing
         # or changing a plan during a slow lookup prevents the later claim.
+        lock_started=time.monotonic()
         with w.lock:
+            workflow_lock_wait_ms=round((time.monotonic()-lock_started)*1000,3)
             state = w.read_state(symbol); now = w.clock()
             signal = self._signal(plan, state, now)
             if signal['key'] != original['key']:
@@ -407,14 +501,14 @@ class QueueRunner:
                 result = dict(status=w.engine.ledger.order(key)['status'], client_key=key)
                 registered=w.clock()
                 self.store.decision(plan['id'],'ORDER_REGISTERED',registered,details=dict(status=result['status'],
+                    workflow_lock_wait_ms=workflow_lock_wait_ms,
                     processing_ms=round((time.monotonic()-entry_started)*1000,3),
                     source_to_order_ms=round((registered-datetime.fromisoformat(original['source_timestamp'])).total_seconds()*1000,3),
                     final_trade_to_order_ms=round((registered-datetime.fromisoformat(state['tick']['source_timestamp'])).total_seconds()*1000,3)))
-                intent = self._receipt(plan, signal, contract, cost, result, now)
                 with self.store.transaction() as db:
                     db.execute("UPDATE queue_attempts SET state='SUBMITTED',client_key=? WHERE signal_key=?", (key, signal['key']))
                     db.execute("UPDATE queue_plans SET state='SUBMITTED',client_key=?,intent=?,reason=NULL,updated_at=? WHERE id=?",
-                        (key, intent, now.isoformat(), plan['id']))
+                        (key, None, now.isoformat(), plan['id']))
                 w.observation_requested.set()
             except Exception:
                 # Once dispatch begins, do not classify an exception as safe to
@@ -423,6 +517,44 @@ class QueueRunner:
                     db.execute("UPDATE queue_attempts SET state='UNCERTAIN',client_key=? WHERE signal_key=?", (key, signal['key']))
                     db.execute("UPDATE queue_plans SET state='UNCERTAIN',reason='RECONCILIATION_REQUIRED',client_key=? WHERE id=?", (key, plan['id']))
                 self.store.decision(plan['id'],'DISPATCH_UNCERTAIN',w.clock(),reason='RECONCILIATION_REQUIRED')
+                return
+        # Order/claim is already durable; monitor wakeup does not depend on a
+        # display receipt. Never classify a presentation failure as uncertainty
+        # about whether the local order was dispatched.
+        self._auxiliary(('receipt',plan,signal,contract,cost,result,now))
+
+    def _catalog_diagnostic(self,plan,stage,market,at,**measurements):
+        self._auxiliary(('catalog',plan,stage,market,at,measurements))
+
+    def _auxiliary(self,job):
+        if self.background_entry_auxiliary:
+            try:self.auxiliary_jobs.put_nowait(job)
+            except Full:self.auxiliary_dropped+=1  # Optional UI work never holds up orders.
+        else:self._run_auxiliary(job)
+
+    def drain_auxiliary(self):
+        """One bounded presentation job; no dispatch, matching or API calls."""
+        try:job=self.auxiliary_jobs.get_nowait()
+        except Empty:return False
+        self._run_auxiliary(job)
+        return True
+
+    def _run_auxiliary(self,job):
+        try:
+            if job[0]=='catalog':
+                _,plan,stage,market,at,measurements=job
+                from queue_entry_diagnostics import catalog_check
+                details=catalog_check(market,plan['symbol'],market.side,at)
+                self.store.decision(plan['id'],stage,at,details=dict(details,**measurements))
+            else:
+                _,plan,signal,contract,cost,result,now=job
+                intent=self._receipt(plan,signal,contract,cost,result,now)
+                if intent is not None:
+                    with self.store.transaction() as db:
+                        db.execute("UPDATE queue_plans SET intent=? WHERE id=? AND state='SUBMITTED' AND client_key=? AND intent IS NULL",
+                            (intent,plan['id'],result['client_key']))
+        except Exception:
+            self.auxiliary_errors+=1  # No private error text, no order retry.
 
     def _receipt(self, plan, signal, contract, cost, result, now):
         if self.service is None:

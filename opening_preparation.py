@@ -16,7 +16,7 @@ class OpeningPreparation:
         self.workflow=workflow;self.store=store
         self.prepared={};self.retry_at={};self.next_at=None
 
-    def step(self,plans,*,ready):
+    def step(self,plans,*,ready,continuous=False):
         w=self.workflow;now=aware(w.clock())
         if not ready or getattr(w.market_data,'direct_quotes',False) is not True:return
         if self.next_at is not None and now<self.next_at:return
@@ -25,7 +25,10 @@ class OpeningPreparation:
         candidates=[]
         for plan in plans:
             opening=aware(datetime.fromisoformat(plan['opens_at']))
-            if plan['state']=='ARMED' and opening-START_BEFORE_OPEN<=now<opening-STOP_BEFORE_OPEN:
+            closing=aware(datetime.fromisoformat(plan['closes_at']))
+            in_window=(opening-START_BEFORE_OPEN<=now<closing if continuous else
+                       opening-START_BEFORE_OPEN<=now<opening-STOP_BEFORE_OPEN)
+            if plan['state']=='ARMED' and in_window:
                 for side in ('CALL','PUT'):
                     key=(plan['id'],side)
                     if now<self.prepared.get(key,now) or now<self.retry_at.get(key,now):continue
@@ -33,21 +36,24 @@ class OpeningPreparation:
         if not candidates:return
         # An existing position or pending order always gets priority over warmup.
         try:
-            if w.pending_orders() or w.positions():return
+            if w.pending_orders() or (not continuous and w.positions()):return
         except Exception:return
         plan,side,key=candidates[0]
         now=aware(w.clock())
-        if now>=aware(datetime.fromisoformat(plan['opens_at']))-STOP_BEFORE_OPEN:return
+        cutoff=aware(datetime.fromisoformat(plan['closes_at'] if continuous else plan['opens_at']))
+        if not continuous:cutoff-=STOP_BEFORE_OPEN
+        if now>=cutoff:return
         self.next_at=now+REQUEST_SPACING
         started=time.monotonic()
         try:
-            market=w.market_data.get_chain(plan['symbol'],side,now,force=False)
+            market=(w.market_data.prepare_calendar(plan['symbol'],side,now) if continuous else
+                    w.market_data.get_chain(plan['symbol'],side,now,force=False))
             if (market.symbol,market.side)!=(plan['symbol'],side):raise ValueError
             select_entry_expiration(market.expirations,now)
             expiry=market.fetched_at+CALENDAR_AGE
             if not market.fetched_at<=aware(w.clock())<expiry:raise ValueError
-            self.prepared[key]=expiry
-            self.store.decision(plan['id'],'PREOPEN_CATALOG_READY',w.clock(),details=dict(
+            self.prepared[key]=expiry-timedelta(minutes=1) if continuous else expiry
+            self.store.decision(plan['id'],'BACKGROUND_CATALOG_READY' if continuous else 'PREOPEN_CATALOG_READY',w.clock(),details=dict(
                 side=side,calendar_expires_at=expiry.isoformat(),
                 preparation_ms=round((time.monotonic()-started)*1000,3)))
         except Exception as error:

@@ -7,22 +7,27 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
 
 ## Estrategia
 
-- Versión `v4_apertura_dentro_sin_veto_previo`, velas de 15 minutos,
+- Versión `v5_apertura_dentro_bandas_actuales`, velas de 15 minutos,
   Bollinger 20 períodos, desviación 2, `ddof=0`.
-- Apertura propia dentro de las bandas recalculadas con los 19 cierres
-  anteriores y esa apertura. Apertura exterior o desconocida no autoriza señal.
+- Aclaración expresa del usuario26/10/2026, tras captura y pregunta concreta:
+  apertura real de esa misma vela dentro de las **bandas del momento de la
+  salida**, calculadas con19cierres anteriores y el precio conocido ahora.
+  Apertura fija/oficial; bandas evolucionan intravela, sin usar cierre futuro.
+  Sustituye el veto de bandas congeladas al primer instante de v4. Apertura
+  desconocida o todavía fuera de las bandas actuales no autoriza señal.
 - Ambas bandas se expanden frente a la vela anterior: superior sube e inferior
   baja. Mayor anchura o movimiento de una sola banda no bastan.
-- Actualización autorizada22/10/2026: mínimo **1% por cada banda** respecto
+- Actualización autorizada26/10/2026: mínimo **3% por cada banda** respecto
   del ancho anterior, inclusive. Tanto el avance de la superior como el
   descenso de la inferior, divididos por el ancho anterior y multiplicados
-  por100, deben ser >=1. Sustituye cualquier apertura positiva sin mínimo;
-  no es1% del precio ni del crecimiento total del ancho. Sigue intravela,
+  por100, deben ser >=3. Sustituye el mínimo1% autorizado22/10;
+  no es3% del precio ni del crecimiento total del ancho. Sigue intravela,
   sin esperar cierre. [Detalle](BAND_EXPANSION_FILTER_2026-10-22.md).
 - Salida superior: precio sobre banda superior y apertura, punto medio subiendo.
   Salida inferior: precio bajo banda inferior y apertura, punto medio bajando.
 - Un cierre anterior fuera no veta una nueva vela con apertura propia dentro.
-  No reintroducir ese veto, tolerancias de apertura ni entradas exteriores.
+  No reintroducir ese veto ni tolerancias de apertura. No autoriza una apertura
+  que permanezca fuera de las bandas del momento de detección.
 - SMA20/40/100/200, Hora/Diario, niveles y memoria son descriptivos. No son
   nuevos filtros, aprobaciones, probabilidades ni umbrales de fuerza.
 - Sin datos futuros, barras inventadas, sustitución de períodos ausentes por

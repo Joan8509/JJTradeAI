@@ -49,6 +49,9 @@ class ManualPracticeTests(unittest.TestCase):
         self.assertEqual(review['action'],'CLOSE')
         result=h.service.observe()[0];self.assertEqual(result['reason'],'TARGET')
         self.assertEqual(Decimal(result['limit']),Decimal('2.23'))
+        # Triggering a sale is not a fill: a new post-order quote is required.
+        self.assertEqual(h.service.positions()[0]['quantity'],3)
+        h.quote(bid=2.23,ask=2.27,seconds=3);h.service.observe()
         with self.assertRaisesRegex(ExecutionBlocked,'NO_FILLED_POSITION'):
             h.service.confirm('owner',review['id'])
         self.assertEqual(len(h.engine.broker.snapshot()),2)

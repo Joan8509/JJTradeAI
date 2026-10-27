@@ -15,7 +15,7 @@ operativo vigente antes de conciliar. Comparar base Git / PC / VPS y preservar
 correcciones, herramientas privadas y datos exclusivos de la VPS.
 
 En un clon de Git pueden faltar diarios operativos y documentos privados de la
-VPS. Consultar `docs/GITHUB_CHECKPOINT_2026-10-23.md` y el contexto vigente;
+VPS. Consultar `docs/GITHUB_CHECKPOINT_2026-10-27.md` y el contexto vigente;
 no inferir configuración ni datos privados a partir del código publicado.
 
 Si el usuario se refiere a un acuerdo o fecha ausente del resumen, buscar en

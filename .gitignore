@@ -66,3 +66,10 @@ exports/vps_transfer/
 exports/runtime_candidates/
 
 exports/sqlite_runtime/
+
+# Local operational continuity and recovery inventories; publish sanitized checkpoints.
+docs/SESSION_STATE_*.md
+docs/VPS*.md
+docs/PC_*.md
+vps_update_manifest.json
+*.before_fix

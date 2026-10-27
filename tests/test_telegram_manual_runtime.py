@@ -48,6 +48,9 @@ class TelegramRuntimeTests(unittest.TestCase):
             companion._monitor()
         self.assertFalse(companion.ready());self.assertEqual(status.call_args.args[0],'MONITOR_BLOCKED')
         self.assertNotIn('PRIVATE_DETAIL',str(status.call_args))
+        self.assertEqual(status.call_args.kwargs['monitor_error_code'],'OBSERVATION_FAILED')
+        self.assertGreaterEqual(status.call_args.kwargs['observation_ms'],0)
+        self.assertEqual(status.call_args.kwargs['observation_revision'],'network_outside_workflow_lock_v1')
 
     def test_direct_signed_entry_needs_monitor_but_not_readonly_telegram_poller(self):
         companion=self.companion();companion.poll_ready=False

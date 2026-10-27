@@ -46,6 +46,7 @@ def record_ingest_revision(database):
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps({'utc': datetime.now(UTC).isoformat(),
             'pid': os.getpid(), 'revision': 'sqlite_wal_publisher_v5',
+            'strategy_version': STRATEGY_VERSION,
             'source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'minimum_band_expansion_pct': MINIMUM_BAND_EXPANSION_PCT,
             'expansion_source_sha256': hashlib.sha256(Path(__file__).with_name('bollinger_expansion.py').read_bytes()).hexdigest(),
@@ -286,14 +287,16 @@ class TickGeometry:
                 prior = state['history']
                 prev_upper, prev_lower = bands_at_open(prior[:-1], prior[-1])
                 upper, lower = bands_at_open(prior[1:], price)
-                opening_upper, opening_lower = bands_at_open(prior[1:], state['opening'])
+                initial_upper, initial_lower = bands_at_open(prior[1:], state['opening'])
                 side = detect_values(prior[-1], prev_upper, prev_lower, sum(prior)/20,
                     price, upper, lower, (sum(prior[1:])+price)/20,
-                    opening=state['opening'], opening_upper=opening_upper, opening_lower=opening_lower)
+                    opening=state['opening'])
                 geometry = {'upper': upper, 'lower': lower,
                     'previous_upper': prev_upper, 'previous_lower': prev_lower,
                     'mid': (sum(prior[1:])+price)/20, 'previous_mid': sum(prior)/20,
-                    'opening_upper': opening_upper, 'opening_lower': opening_lower,
+                    'opening_upper': upper, 'opening_lower': lower,
+                    'initial_opening_upper': initial_upper, 'initial_opening_lower': initial_lower,
+                    'opening_reference': 'CURRENT_BANDS',
                     'opening': state['opening'], 'price': price, 'side': side}
                 if side:
                     exposure = (price-upper if side == 'SUPERIOR' else lower-price)/(upper-lower)*100

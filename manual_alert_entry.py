@@ -11,7 +11,7 @@ from pathlib import Path
 import sqlite3
 import time
 
-from bollinger_phone_worker import STRATEGY_VERSION,canonical_candle,candle_keys
+from bollinger_phone_worker import STRATEGY_VERSION,EVENT_KEY_VERSION,canonical_candle,candle_keys
 from option_contract_selection import entry_candidates,select_entry_expiration
 from schwab_contracts import decimal
 
@@ -44,7 +44,8 @@ def read_alert_reference(database,symbol,side,candle,owner):
         if actual is None:raise ValueError
         candle=canonical_candle(candle)
         notice_keys=candle_keys(f'v1|{owner}|ALPACA|iex|{symbol}',candle,actual)
-        event_keys=candle_keys(f'{STRATEGY_VERSION}|ALPACA|iex|{symbol}',candle,actual)
+        event_keys=candle_keys(f'{EVENT_KEY_VERSION}|ALPACA|iex|{symbol}',candle,actual)
+        event_keys=tuple(dict.fromkeys(event_keys+candle_keys(f'{STRATEGY_VERSION}|ALPACA|iex|{symbol}',candle,actual)))
         started=time.monotonic()
         with closing(sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as db:
             db.execute('PRAGMA query_only=ON')
@@ -52,10 +53,11 @@ def read_alert_reference(database,symbol,side,candle,owner):
             db.execute('BEGIN')
             notice=db.execute('SELECT state,attempted_at FROM bollinger_phone_notifications WHERE event_key IN (?,?)',
                 (notice_keys[0],notice_keys[-1])).fetchone()
-            event=db.execute('SELECT payload_json FROM bollinger_live_events WHERE event_key IN (?,?)',
-                (event_keys[0],event_keys[-1])).fetchone()
+            events=dict(db.execute('SELECT event_key,payload_json FROM bollinger_live_events WHERE event_key IN ('+
+                ','.join('?' for _ in event_keys)+')',event_keys).fetchall())
+            event=next((events[k] for k in event_keys if k in events),None)
         if not notice or not event:raise ValueError
-        e=json.loads(event[0])
+        e=json.loads(event)
         if (e['symbol'],e['side'],canonical_candle(e['candle']))!=(symbol,actual,candle):raise ValueError
         return AlertReference(symbol,side,candle,e['source_timestamp'],notice[1],e['version'],
             e['provider'],e['feed'],e['opening'],e['price'],notice[0])
@@ -67,7 +69,8 @@ def validate_reference(reference,controls,now):
     controls.require_session(now)
     if type(reference) is not AlertReference:raise ExecutionBlocked('DELIVERED_ALERT_REQUIRED')
     r=reference
-    if (r.provider,r.feed,r.version,r.delivery_state)!=('ALPACA','iex',STRATEGY_VERSION,'ENVIADO'):
+    if ((r.provider,r.feed,r.delivery_state)!=('ALPACA','iex','ENVIADO') or
+            r.version not in (STRATEGY_VERSION,EVENT_KEY_VERSION)):
         raise ExecutionBlocked('DELIVERED_ALERT_REQUIRED')
     if r.side not in ('CALL','PUT') or decimal(r.opening)<=0 or decimal(r.detection_price)<=0:
         raise ExecutionBlocked('DELIVERED_ALERT_REQUIRED')

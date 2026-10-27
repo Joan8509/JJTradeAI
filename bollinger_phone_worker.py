@@ -26,7 +26,10 @@ from watchlist_config import load_watchlist
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
-STRATEGY_VERSION = "v4_apertura_dentro_sin_veto_previo"
+STRATEGY_VERSION = "v5_apertura_dentro_bandas_actuales"
+# Stable event identity across the authorized opening interpretation update.
+# Payload version changes; existing events and notification claims never replay.
+EVENT_KEY_VERSION = "v4_apertura_dentro_sin_veto_previo"
 
 
 def canonical_candle(value):
@@ -96,14 +99,11 @@ def detect_exit(prepared):
     columns = ("close", "bollinger_upper", "bollinger_lower", "bollinger_mid")
     if not all(math.isfinite(float(row[column])) for row in (previous, latest) for column in columns):
         return None
-    opening_upper = opening_lower = None
     if latest.get('open') is None or not math.isfinite(float(latest.get('open'))):
         return None
-    if len(prepared) >= 20:
-        opening_upper, opening_lower = bands_at_open(prepared.iloc[-20:-1]['close'].tolist(), latest.get('open'))
     side = detect_values(previous.close, previous.bollinger_upper, previous.bollinger_lower, previous.bollinger_mid,
                          latest.close, latest.bollinger_upper, latest.bollinger_lower, latest.bollinger_mid,
-                         opening=latest.get("open"), opening_upper=opening_upper, opening_lower=opening_lower)
+                         opening=latest.get("open"))
     if side is None:
         return None
     distance=float(latest.close-latest.bollinger_upper) if side=='SUPERIOR' else float(latest.bollinger_lower-latest.close)
@@ -122,20 +122,19 @@ def bands_at_open(prior_closes, opening):
 
 
 def detect_values(previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid, *, opening=None, opening_upper=None, opening_lower=None):
-    """Regla única compartida por el radar y la reconstrucción histórica."""
+    """Shared live/replay rule. Legacy opening-band kwargs are audit-only.
+
+    User clarification26/10: compare this candle's genuine opening with the
+    bands available NOW, not bands frozen at its first trade. No future close.
+    """
     if not all(math.isfinite(float(value)) for value in (previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid)):
         return None
     if opening is None or not math.isfinite(float(opening)):
         return None
-    # Recalcula las bandas con los 19 cierres conocidos y la apertura, no con el
-    # cierre posterior. Un salto ya fuera de estas bandas sigue excluido.
-    open_upper = previous_upper if opening_upper is None else opening_upper
-    open_lower = previous_lower if opening_lower is None else opening_lower
-    if not all(math.isfinite(float(v)) for v in (open_upper, open_lower)) or not open_lower <= opening <= open_upper:
+    if not lower <= opening <= upper:
         return None
-    # La vela observada abre dentro y después sale. Un cierre anterior apenas
-    # expuesto no invalida esa nueva salida; la apertura propia evita aceptar
-    # una continuación que ya comienza fuera.
+    # Opening stays fixed/official; only the live bands evolve. An opening
+    # still outside those current bands cannot authorize an exit.
     # Condición obligatoria de volatilidad: ambos disipadores deben abrirse
     # frente a la vela anterior. Una salida del precio o más ancho por una
     # sola banda no basta y ningún apoyo histórico puede saltarse esta regla.
@@ -359,7 +358,8 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
                      "reference_scope": reference_scope,
                      "source_timestamp": source_time.isoformat(), "source_kind":source_kind,
                      "detected_at": detected_time.isoformat(), "version": STRATEGY_VERSION, "opening": opening}
-            keys = candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])
+            keys = candle_keys(f"{EVENT_KEY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])
+            keys = tuple(dict.fromkeys(keys+candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])))
             existing = db.execute(f"SELECT event_key FROM bollinger_live_events WHERE event_key IN ({','.join('?' for _ in keys)}) ORDER BY detected_at LIMIT 1", keys).fetchone()
             event_key = existing[0] if existing else keys[0]
             if existing is None:

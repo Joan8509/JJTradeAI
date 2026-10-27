@@ -140,6 +140,11 @@ class AlertEntryTests(unittest.TestCase):
             read_alert_reference(dbpath,'AMZN','CALL',r.candle,'other')
         self.assertEqual(before,dbpath.read_bytes())
 
+    def test_legacy_delivered_reference_remains_explicit_manual_only(self):
+        from bollinger_phone_worker import EVENT_KEY_VERSION
+        old=replace(self.reference,version=EVENT_KEY_VERSION)
+        validate_reference(old,self.f.service._controls(self.f.state),self.f.now)
+
     def test_legacy_chat_and_readonly_watch_do_not_reintroduce_pullback_veto(self):
         self.f.state['tick']['signal']=None;self.f.state['tick']['reason']='READY_NO_EXIT'
         watch=self.h.service.watch(self.h.raw(),'AMZN','CALL',self.candle)

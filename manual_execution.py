@@ -6,6 +6,7 @@ Opening a link or preparing a review never places an order.
 from datetime import datetime, timezone
 import json
 import secrets
+import time
 from threading import RLock, Event
 
 from manual_trade_service import ManualDataError, current_manual_signal, manual_candidates
@@ -66,6 +67,8 @@ class ManualWorkflow:
             raise ValueError('ISOLATED_COMPONENTS_REQUIRED')
         self.engine=engine;self.reviews=reviews;self.read_state=read_state
         self.market_data=market_data;self.clock=clock;self.lock=RLock()
+        self.observation_lock=RLock()
+        self.observation_journal=None
         self.observation_requested=Event()
 
     def _policy(self):
@@ -198,15 +201,14 @@ class ManualWorkflow:
         return dict(snapshot=contract.snapshot,underlying_price=market.chain.underlying_price,
             underlying_timestamp=market.chain.underlying_timestamp,session_open=session_open)
 
-    def _exit(self, contract_symbol, *, force=False):
+    def _exit(self, contract_symbol, *, force=False, market=None):
         position,source=self._owned(contract_symbol)
         # A position can be closed after the entry signal retracts or changes side.
         side=_parse_occ_symbol(contract_symbol.replace(' ',''))[0]
         state=self.read_state(source['underlying']);controls=self._controls(state)
         controls.require_session(self.clock())
-        market=(self.market_data.get_entry_chain(source['underlying'],side,contract_symbol,self.clock(),force=force)
-            if getattr(self.market_data,'direct_quotes',False) else
-            self.market_data.get_chain(source['underlying'],side,self.clock(),force=force))
+        if market is None:
+            market=self._observation_market(source['underlying'],contract_symbol,force=force)
         now=self.clock();controls.require_session(now)
         contract=next((c for c in market.chain.contracts if c.snapshot.symbol==contract_symbol),None)
         if contract is None:
@@ -313,53 +315,90 @@ class ManualWorkflow:
         if self.engine.reconcile(now)['status']!='RECONCILED':
             raise ExecutionBlocked('POSITION_RECONCILIATION_REQUIRED')
 
+    def _observation_market(self, symbol, contract, *, force=False):
+        """Provider I/O must precede taking the workflow mutation lock."""
+        side=_parse_occ_symbol(contract.replace(' ',''))[0]
+        self._controls(self.read_state(symbol)).require_session(self.clock())
+        return (self.market_data.get_entry_chain(symbol,side,contract,self.clock(),force=force)
+            if getattr(self.market_data,'direct_quotes',False) else
+            self.market_data.get_chain(symbol,side,self.clock(),force=force))
+
     def observe(self):
         """One local simulation step; never a fill claim from the real broker.
 
         Explicit fresh quote matches and durable quote-liquidity dedup. Invocation
         needs a UI/worker; this method does not start a background monitor.
         """
+        # Serialize observers independently, never blocking an entry while REST
+        # is in flight. Every mutation re-reads ledger/session/quote under lock.
+        with self.observation_lock:
+            return self._observe()
+
+    def _observe(self):
+        results=[];quote_errors=[]
         with self.lock:
-            self._reconcile(self.clock());results=[]
-            if practice_policy(self.engine.policy):
+            self._reconcile(self.clock())
+            exiting={r['order']['contract'] for r in self.pending_orders() if r['order']['instruction']=='SELL_TO_CLOSE'}
+            positions=[p for p in self.positions() if p['contract'] not in exiting] if practice_policy(self.engine.policy) else []
+        for p in positions:
+            try:
+                market=self._observation_market(p['symbol'],p['contract'])
+            except Exception as error:
+                quote_errors.append(error);continue
+            with self.lock:
+                if not any(r['contract']==p['contract'] for r in self.positions()):continue
                 # Protect filled exposure BEFORE matching another entry tranche.
                 # Cancel acknowledgement and reconciliation must precede selling.
-                for p in self.positions():
-                    _,_,c,controls,now=self._exit(p['contract'])
-                    stored=p['plan']
-                    plan=ExitPlan(stored['profit_mode'],
-                        decimal(stored['target_pct']) if stored['target_pct'] is not None else None,
-                        decimal(stored['stop_pct']),stored['max_holding_minutes'],stored['pricing_model'])
-                    target,stop=plan.levels(p['average_fill'],None)
-                    if decimal(c.snapshot.bid)<=stop or (target is not None and decimal(c.snapshot.bid)>=target):
-                        for row in self.pending_orders():
-                            if row['order']['contract']==p['contract'] and row['order']['instruction']=='BUY_TO_OPEN':
-                                if not row['broker_id']:
-                                    raise ExecutionBlocked('ENTRY_CANCELLATION_AND_RECONCILIATION_REQUIRED')
-                                self.engine.broker.acknowledge_cancel(row['broker_id'])
-                        self._reconcile(now)
-                        results.append(self.engine.manage_exit(c,controls,now))
-            for row in self.engine.ledger.orders():
+                try:position,source,c,controls,now=self._exit(p['contract'],market=market)
+                except (ValueError,ExecutionBlocked) as error:
+                    quote_errors.append(error);continue
+                stored=source['plan']
+                plan=ExitPlan(stored['profit_mode'],
+                    decimal(stored['target_pct']) if stored['target_pct'] is not None else None,
+                    decimal(stored['stop_pct']),stored['max_holding_minutes'],stored['pricing_model'])
+                average=position['premium']/(position['quantity']*100)
+                target,stop=plan.levels(average,None)
+                if decimal(c.snapshot.bid)<=stop or (target is not None and decimal(c.snapshot.bid)>=target):
+                    for row in self.pending_orders():
+                        if row['order']['contract']==p['contract'] and row['order']['instruction']=='BUY_TO_OPEN':
+                            if not row['broker_id']:
+                                raise ExecutionBlocked('ENTRY_CANCELLATION_AND_RECONCILIATION_REQUIRED')
+                            self.engine.broker.acknowledge_cancel(row['broker_id'])
+                    self._reconcile(now)
+                    result=self.engine.manage_exit(c,controls,now);results.append(result)
+                    if result.get('status') in ('EXIT_WORKING','EXIT_UNCERTAIN'):self._exit_diagnostic('EXIT_ORDER_REGISTERED',self.engine.ledger.order(result['client_key']),c)
+        with self.lock:pending=sorted(self.pending_orders(),key=lambda r:r['order']['instruction']!='SELL_TO_CLOSE')
+        for snapshot in pending:
+            from automatic_entry_execution import queued_entry_expired,require_queued_match
+            with self.lock:
+                row=self.engine.ledger.order(snapshot['client_key'])
+                if row['status'] not in ACTIVE or not row['broker_id']:continue
                 order=row['order']
-                if row['status'] not in ACTIVE or not row['broker_id']:
-                    continue
-                if order['account_alias']!=self.engine.policy.account_alias:
-                    continue
-                from automatic_entry_execution import queued_entry_expired,require_queued_match
+                if quote_errors and order['instruction']=='BUY_TO_OPEN':
+                    continue  # Keep managing exits; do not add unmonitored exposure.
                 if queued_entry_expired(order,self.clock()):
                     # Only acknowledge a local cancellation; never retry/rearm.
                     self.engine.broker.acknowledge_cancel(row['broker_id'])
                     self._reconcile(self.clock())
                     continue
-                side=_parse_occ_symbol(order['contract'].replace(' ',''))[0]
-                state=self.read_state(order['underlying']);self._controls(state).require_session(self.clock())
-                market=(self.market_data.get_entry_chain(order['underlying'],side,order['contract'],self.clock(),
-                        force=order.get('entry_basis')=='ARMED_LOCAL_QUEUE_V2' and order['instruction']=='BUY_TO_OPEN')
-                    if getattr(self.market_data,'direct_quotes',False) else
-                    self.market_data.get_chain(order['underlying'],side,self.clock()))
+            selling=order['instruction']=='SELL_TO_CLOSE'
+            lookup_started=time.monotonic()
+            if selling:self._exit_diagnostic('LOOKUP_STARTED',row)
+            try:
+                market=self._observation_market(order['underlying'],order['contract'],
+                    force=selling or order.get('entry_basis')=='ARMED_LOCAL_QUEUE_V2' and order['instruction']=='BUY_TO_OPEN')
+            except Exception as error:
+                if selling:self._exit_diagnostic('LOOKUP_FAILED',row,lookup_ms=(time.monotonic()-lookup_started)*1000)
+                quote_errors.append(error);continue
+            with self.lock:
+                row=self.engine.ledger.order(snapshot['client_key'])
+                if row['status'] not in ACTIVE or not row['broker_id']:continue
+                order=row['order']
+                self._controls(self.read_state(order['underlying'])).require_session(self.clock())
                 contract=next((c for c in market.chain.contracts if c.snapshot.symbol==order['contract']),None)
                 if contract is None:
                     continue
+                if selling:self._exit_diagnostic('LOOKUP_FINISHED',row,contract,lookup_ms=(time.monotonic()-lookup_started)*1000)
                 now=self.clock()
                 if queued_entry_expired(order,now):
                     self.engine.broker.acknowledge_cancel(row['broker_id'])
@@ -368,14 +407,47 @@ class ManualWorkflow:
                 try:require_queued_match(order,contract,market,now)
                 except ValueError:continue
                 if contract.snapshot.quote_timestamp is not None and contract.snapshot.quote_timestamp<=datetime.fromisoformat(order['created_at']):
+                    if selling:self._exit_diagnostic('POST_ORDER_QUOTE_REQUIRED',row,contract)
                     continue  # Provider has not published post-order liquidity yet.
                 identity=digest(['LOCAL_QUOTE',row['client_key'],contract.snapshot.quote_timestamp])
-                self.engine.broker.match_quote(row['broker_id'],contract,now=now,execution_id=identity)
+                filled=self.engine.broker.match_quote(row['broker_id'],contract,now=now,execution_id=identity)
+                if selling:
+                    stage='MATCH_APPLIED' if filled else 'BID_BELOW_LIMIT' if decimal(contract.snapshot.bid)<decimal(order['limit']) else 'NO_AVAILABLE_LIQUIDITY'
+                    self._exit_diagnostic(stage,row,contract,filled=filled)
+        with self.lock:
             self._reconcile(self.clock())
-            for position in self.positions():
-                _,_,contract,controls,now=self._exit(position['contract'])
-                results.append(self.engine.manage_exit(contract,controls,now))
-            return results
+            exiting={r['order']['contract'] for r in self.pending_orders() if r['order']['instruction']=='SELL_TO_CLOSE'}
+            positions=[p for p in self.positions() if p['contract'] not in exiting]
+        for position in positions:
+            try:
+                market=self._observation_market(position['symbol'],position['contract'])
+            except Exception as error:
+                quote_errors.append(error);continue
+            with self.lock:
+                if not any(r['contract']==position['contract'] for r in self.positions()):continue
+                try:_,_,contract,controls,now=self._exit(position['contract'],market=market)
+                except (ValueError,ExecutionBlocked) as error:
+                    quote_errors.append(error);continue
+                result=self.engine.manage_exit(contract,controls,now);results.append(result)
+                if result.get('status') in ('EXIT_WORKING','EXIT_UNCERTAIN'):self._exit_diagnostic('EXIT_ORDER_REGISTERED',self.engine.ledger.order(result['client_key']),contract)
+        # Healthy exposure was still managed. Unmanaged exposure continues to
+        # fail the monitor readiness gate; this never authorizes another buy.
+        if quote_errors:raise quote_errors[0]
+        return results
+
+    def _exit_diagnostic(self,event,row,contract=None,**metrics):
+        if self.observation_journal is None:return
+        try:
+            now=self.clock();order=row['order']
+            fields=dict(at=now,client_key=row['client_key'],contract=order['contract'],
+                reason=order.get('exit_reason'),limit=order['limit'],
+                order_age_ms=(now-datetime.fromisoformat(order['created_at'])).total_seconds()*1000,**metrics)
+            if contract is not None:
+                q=contract.snapshot
+                fields.update(bid=q.bid,ask=q.ask,quote_at=q.quote_timestamp,
+                    quote_age_ms=(now-q.quote_timestamp).total_seconds()*1000 if q.quote_timestamp else None)
+            self.observation_journal.record(event,**fields)
+        except Exception:pass  # Optional diagnostics never change trading.
 
 
 def configured_workflow(profile, root, *, read_state, market_data):
@@ -401,6 +473,8 @@ def configured_workflow(profile, root, *, read_state, market_data):
     engine=SimulationEngine(SimulationLedger(root/'ledger.db'),LocalPaperBroker(root/'broker.db'),policy)
     workflow=ManualWorkflow(engine,ManualReviews(root/'reviews.db'),read_state=read_state,market_data=market_data)
     if observed:
+        from observation_journal import ObservationJournal
+        workflow.observation_journal=ObservationJournal(root/'exit_observations.jsonl')
         from telegram_manual_controls import entry_monitor_ready
         workflow.entry_ready=entry_monitor_ready
     return workflow

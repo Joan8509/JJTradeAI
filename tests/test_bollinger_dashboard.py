@@ -40,7 +40,8 @@ class BollingerDashboardTests(unittest.TestCase):
         self.database = self.directory/'isolated.db'
         self.status = self.directory/'radar.json'
         self.now = datetime(2026, 10, 16, 19, 1, 2, tzinfo=timezone.utc)
-        self.version = 'v4_apertura_dentro_sin_veto_previo'
+        from bollinger_phone_worker import STRATEGY_VERSION
+        self.version = STRATEGY_VERSION
         with closing(sqlite3.connect(self.database)) as db, db:
             db.executescript('CREATE TABLE market_sessions(session_date TEXT PRIMARY KEY,opens_at TEXT,closes_at TEXT);'
                 'CREATE TABLE bollinger_radar_state(symbol TEXT PRIMARY KEY,payload_json TEXT);'
@@ -84,7 +85,7 @@ class BollingerDashboardTests(unittest.TestCase):
                 self.assertIn('104.25', text)
                 self.assertIn('Vela de 15 minutos', captions)
                 self.assertIn('No es el bid/ask', captions)
-                self.assertIn('$0.35 – $0.90 USD', captions)
+                self.assertIn('$0.45 – $0.95 USD', captions)
                 self.assertIn('Operar', [b.label for b in page.button])
                 self.assertTrue(next(e for e in page.expander if 'historial' in e.label).proto.expanded)
 

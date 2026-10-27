@@ -51,6 +51,9 @@ def read_operation_results(path=LEDGER,*,now=None,account_alias=None):
             side=_parse_occ_symbol(order['contract'].replace(' ',''))[0],quantity=quantity,
             requested_quantity=order['quantity'],remaining=report['remaining_quantity'] if report else quantity,
             entry_average=basis/quantity,entry_status=row['status'],opened_at=opened_at,
+            created_at=datetime.fromisoformat(row['created_at']),
+            plan=dict(order.get('plan') or {}),entry_basis=order.get('entry_basis'),
+            execution_model=order.get('execution_model'),
             closed_at=datetime.fromisoformat(report['closed_at']) if report and report['status']=='CLOSED' else None,
             status=report['status'] if report else 'OPEN',report=report))
     return dict(entries=entries,pending_requests=pending,available=True)

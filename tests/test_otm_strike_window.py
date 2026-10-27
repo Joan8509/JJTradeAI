@@ -92,14 +92,16 @@ class OtmStrikeWindowTests(unittest.TestCase):
         fifth=next(r for r in detail['contracts'] if r['strike']=='109.0')
         self.assertFalse(fifth['itm']);self.assertEqual(fifth['otm_position'],5);self.assertTrue(fifth['eligible'])
 
-    def test_automatic_queue_buys_fifth_using_fresh_direct_quote_without_telegram(self):
+    def test_automatic_queue_buys_fifth_using_subsecond_provider_catalog_without_telegram(self):
         h=queue.AutomaticQueueTests();h.setUp();self.addCleanup(h.doCleanups)
         h.f.payload=otm_payload();h.runner.service=None;h.arm();h.runner.step()
         self.assertEqual(h.plan()['state'],'SUBMITTED')
         orders=h.f.engine.ledger.orders();self.assertEqual(len(orders),1)
         self.assertEqual(orders[0]['order']['contract'],sim.synthetic_contract(strike=109).snapshot.symbol)
-        self.assertEqual(orders[0]['order']['limit'],'2.0')
-        h.f.client.quotes.assert_called_once()
+        # The approved queue cap is distinct from the observed Ask. A provider
+        # catalog with sub-second option AND spot timestamps needs no extra GET.
+        self.assertEqual(orders[0]['order']['limit'],'2.3')
+        h.f.client.quotes.assert_not_called()
 
     def test_automatic_final_quote_spot_move_cannot_promote_sixth(self):
         h=queue.AutomaticQueueTests();h.setUp();self.addCleanup(h.doCleanups)
@@ -108,10 +110,18 @@ class OtmStrikeWindowTests(unittest.TestCase):
         q=deepcopy(h.f.payload['callExpDateMap']['2026-10-23:7']['105.0'][0])
         q.update(symbol=sim.synthetic_contract(strike=104).snapshot.symbol,strikePrice=104.)
         h.f.payload['callExpDateMap']['2026-10-23:7']['104.0']=[q]
+        # Exercise the direct-refresh path, not the valid sub-second reuse path:
+        # the initial catalog is still usable but must refresh before dispatch.
+        old_ms=int((h.f.now-timedelta(seconds=2)).timestamp()*1000)
+        h.f.payload['underlying']['quoteTime']=old_ms
+        for strikes in h.f.payload['callExpDateMap'].values():
+            for items in strikes.values():
+                for item in items:item['quoteTimeInLong']=old_ms
         direct=h.f.client.quotes.side_effect
         def changed(symbols,now):
             result=direct(symbols,now);result['AMZN']['quote']['lastPrice']=103.;return result
         h.f.client.quotes.side_effect=changed;h.arm();h.runner.step()
+        h.f.client.quotes.assert_called_once()
         self.assertEqual(h.f.engine.ledger.orders(),[])
         self.assertEqual(h.plan()['state'],'ARMED')
 

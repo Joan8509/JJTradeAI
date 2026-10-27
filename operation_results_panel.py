@@ -6,7 +6,7 @@ from mobile_layout import MOBILE_STYLE
 from operation_results import LEDGER,NY,read_operation_results,results_for_period
 
 
-@st.fragment(run_every='5s')
+@st.fragment
 def render_operation_results(*,path=LEDGER,now=None,title='Operaciones y resultados',default_period='Hoy',show_manage=False):
     st.markdown(MOBILE_STYLE,unsafe_allow_html=True)
     st.markdown('## '+title)
@@ -28,6 +28,8 @@ def render_operation_results(*,path=LEDGER,now=None,title='Operaciones y resulta
             st.query_params.clear();st.query_params['operaciones']='1';st.rerun()
     if summary['pending_requests']:
         st.caption(f"Solicitudes pendientes de compra: {summary['pending_requests']}. Aún no cuentan como operaciones realizadas.")
+    from trade_learning import render_trade_learning
+    render_trade_learning(history,as_of=now)
     if not summary['entries']:
         st.info('Todavía no hay compras ejecutadas en este período.');return
     st.caption('Los cierres se agrupan por su fecha ET. Las operaciones abiertas se muestran aparte del resultado cerrado.')
@@ -53,4 +55,4 @@ def render_operation_results(*,path=LEDGER,now=None,title='Operaciones y resulta
         st.divider()
     if len(summary['entries'])>limit and st.button('Ver más',key='results_more'):
         st.session_state['results_visible']=limit+20;st.rerun()
-    if st.button('Actualizar',key='results_refresh',width='stretch'):st.rerun()
+    st.button('Actualizar',key='results_refresh',width='stretch')
