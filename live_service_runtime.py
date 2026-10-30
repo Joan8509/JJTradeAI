@@ -215,9 +215,18 @@ class ResilientStreamSupervisor:
                 self._stream = self.stream_factory()
 
                 def tracked_bar(bar: MarketBar) -> None:
-                    self.health.update(
-                        self.service_id, "CONECTADO", bar_timestamp=bar.timestamp
-                    )
+                    try:
+                        self.health.update(
+                            self.service_id, "CONECTADO", bar_timestamp=bar.timestamp
+                        )
+                    except sqlite3.OperationalError as error:
+                        # A health receipt is not canonical market storage. A
+                        # busy writer must not kill an otherwise live stream.
+                        # Leave the old receipt stale; retry on the next bar.
+                        code = getattr(error, 'sqlite_errorcode', None)
+                        if not isinstance(code, int) or code & 255 not in (
+                                sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                            raise
                     on_bar(bar)
 
                 def status_changed(status: str) -> None:

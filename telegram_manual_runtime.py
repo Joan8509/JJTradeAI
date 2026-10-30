@@ -12,8 +12,8 @@ import threading
 import time
 
 from manual_execution import configured_workflow
-from observation_journal import ObservationJournal
-from manual_trade_service import owner_market_data,read_manual_state,MARKET_CACHE_REVISION
+from observation_journal import ObservationJournal,observation_error_code,market_failure_counts
+from manual_trade_service import owner_market_data,read_manual_state,MARKET_CACHE_REVISION,POSITION_QUOTE_REVISION
 from market_store import DEFAULT_MARKET_DATABASE
 from schwab_connection import EncryptedSchwabStore
 from telegram_manual import TelegramManualService,TelegramManualStore
@@ -24,6 +24,8 @@ from trade_close_notifications import SaleNotifier,SaleNoticeStore
 from zoneinfo import ZoneInfo
 from bollinger_phone_worker import STRATEGY_VERSION
 from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT
+from automatic_entry_execution import SIGNAL_ENTRY_WINDOW_SECONDS,SIGNAL_WINDOW_REVISION
+from detector_clock_health import check_detector_clock,REVISION as CLOCK_HEALTH_REVISION
 
 ROOT=Path(__file__).resolve().parent
 PORT=8184
@@ -66,6 +68,7 @@ class Companion:
         self.poll_last_success=None
         self.poll_transport_backoff=5
         self.monitor_ready=False;self.monitor_at=None
+        self.detector_clock_ok=check_detector_clock()
         self.monitor_wake=threading.Event()
         self.notice_wake=threading.Event()
         service.workflow.observation_requested=self.monitor_wake
@@ -81,9 +84,11 @@ class Companion:
             if type(service.workflow.engine.policy) is ManualPracticePolicy:
                 from queue_position_cards import PositionCardPublisher
                 self.position_publisher=PositionCardPublisher(service.workflow)
-                self.entry_queue=QueueRunner(service.workflow,QueueStore(),ready=self.monitor_active,service=service)
+                self.entry_queue=QueueRunner(service.workflow,QueueStore(),ready=self.automatic_entry_ready,service=service)
+                self.entry_queue.readiness_reason=self.entry_readiness_reason
                 self.entry_queue.background_preparation=True
                 self.entry_queue.background_entry_auxiliary=True
+                self.entry_queue.enable_parallel_entries()
                 self.queue_notifier=QueueNotifier(self.entry_queue.store,service,api)
         except Exception:
             pass  # Queue failure must never disable management of existing positions.
@@ -92,8 +97,14 @@ class Companion:
         return self.poll_ready and self.monitor_active()
 
     def monitor_active(self):
-        return (self.monitor_ready and self.monitor_at is not None and
+        return (not self.stop.is_set() and self.monitor_ready and self.monitor_at is not None and
                 0<=(datetime.now(timezone.utc)-self.monitor_at).total_seconds()<=10)
+
+    def automatic_entry_ready(self):
+        return self.detector_clock_ok and self.monitor_active()
+
+    def entry_readiness_reason(self):
+        return 'DETECTOR_CLOCK_CHECK_FAILED' if not self.detector_clock_ok else 'MONITOR_NOT_READY'
 
     def _poll(self):
         try:
@@ -146,15 +157,12 @@ class Companion:
                 self.monitor_ready=False
                 # Fixed allowlist only: never persist exception text, provider
                 # bodies, credential-bearing URLs, or private account details.
-                code=str(error)
-                monitor_error_code=code if code in {
-                    'MARKET_DATA_COOLDOWN','MARKET_DATA_UNAVAILABLE','EXIT_QUOTE_UNUSABLE',
-                    'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
-                    'TRANSPORT_FAILURE','HTTP_FAILURE','POSITION_RECONCILIATION_REQUIRED',
-                    'ENTRY_CANCELLATION_AND_RECONCILIATION_REQUIRED',
-                } else 'OBSERVATION_FAILED'
+                monitor_error_code=observation_error_code(error)
             observation_ms=round((time.monotonic()-observation_started)*1000,3)
             self.monitor_at=datetime.now(timezone.utc)
+            if self.entry_queue is not None and self.monitor_ready:
+                try:self.entry_queue.rearm_settled()
+                except Exception:pass  # Uncertain settlement never authorizes another entry.
             if self.position_publisher is not None:
                 try:self.position_publisher.publish(monitor_ready=self.monitor_ready)
                 except Exception:pass  # Display failure cannot disable exits or retry orders.
@@ -164,18 +172,38 @@ class Companion:
             _status(state,port=PORT,monitor_ready=self.monitor_ready,sale_notices_state=self.notice_state,
                 automatic_entry_revision=ENTRY_LATENCY_REVISION,automatic_entry_poll_ms=int(ENTRY_POLL_SECONDS*1000),
                 automatic_entry_lifetime_seconds=10,entry_monitor_wakeup=True,
+                signal_entry_window_seconds=SIGNAL_ENTRY_WINDOW_SECONDS,
+                signal_window_revision=SIGNAL_WINDOW_REVISION,
                 execution_notice_wakeup=True,
                 observation_revision='network_outside_workflow_lock_v1',
                 exit_observation_revision='fresh_pending_exit_quotes_v1',
+                detector_clock_revision='indexed_first_detector_exit_v1',
+                detector_clock_timezone_revision='utc_range_bounds_v1',
+                detector_clock_health_revision=CLOCK_HEALTH_REVISION,
+                detector_clock_selfcheck_ok=self.detector_clock_ok,
+                exit_pricing_revision='next_bid_stop_target_floor_v2',
+                market_failure_revision='scoped_decode_shared_transport_v1',
+                market_failure_counts=market_failure_counts(self.service.workflow.market_data),
                 exit_diagnostics_enabled=isinstance(getattr(self.service.workflow,'observation_journal',None),ObservationJournal),
                 entry_auxiliary_revision='background_entry_presentation_v1',
                 entry_auxiliary_enabled=bool(self.entry_queue is not None and self.entry_queue.background_entry_auxiliary),
                 entry_auxiliary_dropped=self.entry_queue.auxiliary_dropped if self.entry_queue is not None else 0,
                 entry_auxiliary_errors=self.entry_queue.auxiliary_errors if self.entry_queue is not None else 0,
                 market_cache_revision=MARKET_CACHE_REVISION,
+                position_quote_revision=POSITION_QUOTE_REVISION,
+                position_quote_history_revision='observed_bid_trace_v1',
+                position_card_revision='owned_quote_cache_v1',
                 observation_ms=observation_ms,monitor_error_code=monitor_error_code,
                 strategy_version=STRATEGY_VERSION,
                 minimum_band_expansion_pct=MINIMUM_BAND_EXPANSION_PCT,
+                entry_band_comparison_revision='entry_band_3_vs_5_observation_v1',
+                entry_band_comparison_mode='OBSERVATION_ONLY',
+                entry_band_comparison_candidate_pct=5,
+                entry_optional_decision_revision='background_optional_decisions_v1',
+                entry_quality_revision='entry_quality_snapshot_after_dispatch_v1',
+                entry_dispatch_revision='bounded_parallel_lookup_v1',
+                entry_rearm_revision='settled_new_signal_repeat_v1',
+                entry_dispatch_capacity=self.entry_queue.entry_capacity() if self.entry_queue is not None else None,
                 background_catalog_preparation=bool(self.entry_queue is not None),
                 preopen_preparation_enabled=bool(self.entry_queue is not None and
                     getattr(self.service.workflow.market_data,'direct_quotes',False) is True),
@@ -253,7 +281,9 @@ class Companion:
         return self
 
     def close(self):
-        self.stop.set();self.monitor_wake.set();self.notice_wake.set();self.server.shutdown();self.server.server_close();_status('STOPPED')
+        self.stop.set()
+        if self.entry_queue is not None:self.entry_queue.close_entries()
+        self.monitor_wake.set();self.notice_wake.set();self.server.shutdown();self.server.server_close();_status('STOPPED')
 
 
 def start_optional():

@@ -82,6 +82,7 @@ def bulk_test_page():
     now=datetime.now(timezone.utc);store=Mock()
     def save(rows,*args,**kwargs):
         st.session_state['saved_rows']=rows
+        st.session_state['saved_repeat']=kwargs.get('repeat',False)
         st.session_state['batch_calls']=st.session_state.get('batch_calls',0)+1
         return ['a','b']
     store.arm_many.side_effect=save
@@ -100,6 +101,17 @@ def bulk_test_page():
 
 
 class BulkQueueUITests(TestCase):
+    def test_repeat_choice_requires_fresh_consent_and_is_saved(self):
+        app=self.prepare()
+        self.assertTrue(app.checkbox(key='auto_queue_repeat').value)
+        app.checkbox(key='auto_bulk_consent').check().run()
+        app.checkbox(key='auto_queue_repeat').uncheck().run()
+        self.assertFalse(app.checkbox(key='auto_bulk_consent').value)
+        app.checkbox(key='auto_bulk_consent').check().run()
+        app.button(key='auto_bulk_arm').click().run()
+        self.assertEqual(len(app.exception),0)
+        self.assertIs(app.session_state['saved_repeat'],False)
+
     def test_unapplied_common_values_explain_disabled_button(self):
         from streamlit.testing.v1 import AppTest
         app=AppTest.from_function(bulk_test_page).run(timeout=20)

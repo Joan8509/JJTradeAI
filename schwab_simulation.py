@@ -314,6 +314,14 @@ class SimulationLedger(_IsolatedDatabase):
             return self._portfolio(db)[0]
 
 
+def observed_bid_stop(order):
+    """Explicit local-only policy; never applies to manual/legacy/live orders."""
+    return (order.get('execution_model')==OBSERVED_MANUAL
+        and order.get('instruction')=='SELL_TO_CLOSE' and order.get('exit_reason')=='LOSS_LIMIT'
+        and order.get('exit_pricing_policy')=='NEXT_VALID_BID_STOP_V1'
+        and order.get('order_type')=='SIMULATED_MARKET')
+
+
 class LocalPaperBroker(_IsolatedDatabase):
     """Independent durable synthetic broker; never imports a network client."""
     def __init__(self, path):
@@ -389,14 +397,15 @@ class LocalPaperBroker(_IsolatedDatabase):
             validate_contract(contract, observed=order.get('execution_model') == OBSERVED_MANUAL)
             if order['contract'] != q.symbol or not fresh(datetime.fromisoformat(order['created_at']), now, 86400):
                 raise ExecutionBlocked('CONTRACT_OR_ORDER_TIME_MISMATCH')
-            if (aware(q.quote_timestamp) < datetime.fromisoformat(order['created_at']) or
+            if ((observed_bid_stop(order) and aware(q.quote_timestamp)<=datetime.fromisoformat(order['created_at'])) or
+                    aware(q.quote_timestamp) < datetime.fromisoformat(order['created_at']) or
                     not datetime.fromisoformat(order['session_opens']) <= aware(now) < datetime.fromisoformat(order['session_closes']) or
                     q.expiration < aware(now).astimezone(NY).date()):
                 raise ExecutionBlocked('MATCH_OUTSIDE_ORDER_LIFETIME')
             buying = order['instruction'] == 'BUY_TO_OPEN'
             price, size = decimal(q.ask if buying else q.bid), q.ask_size if buying else q.bid_size
             limit = decimal(order['limit'])
-            if (buying and price > limit) or (not buying and price < limit):
+            if (buying and price > limit) or (not buying and not observed_bid_stop(order) and price < limit):
                 return 0
             filled = db.execute('SELECT COALESCE(SUM(quantity),0) FROM paper_fills WHERE order_id=?', (broker_id,)).fetchone()[0]
             used = db.execute('SELECT COALESCE(SUM(f.quantity),0) FROM paper_fills f JOIN paper_orders o '
@@ -467,7 +476,7 @@ class SimulationEngine:
                     if (price <= 0 or fee < 0 or not fresh(datetime.fromisoformat(order['created_at']),
                             datetime.fromisoformat(fill['time']), 86400) or
                             (order['instruction'] == 'BUY_TO_OPEN' and price > decimal(order['limit'])) or
-                            (order['instruction'] == 'SELL_TO_CLOSE' and price < decimal(order['limit']))):
+                            (order['instruction'] == 'SELL_TO_CLOSE' and not observed_bid_stop(order) and price < decimal(order['limit']))):
                         raise ExecutionBlocked('INVALID_EXECUTION_EVIDENCE')
                     values = (key, positive_int(fill['quantity']), str(decimal(fill['price'])),
                               str(decimal(fill['fee'])), fill['time'])
@@ -606,6 +615,8 @@ class SimulationEngine:
             'created_at': aware(now).isoformat(), 'signal_key': signal['key'], 'plan': plan}
         if observed:
             order.update(execution_model=OBSERVED_MANUAL, fees_known=False, cost_basis='PREMIUM_ONLY')
+            from entry_band_comparison import attach_comparison
+            attach_comparison(order,snapshot)
         order.update(queued_payload)
         if manual_alert is not None:order['entry_basis']='DELIVERED_ALERT_MANUAL_V1'
         order.update(session_opens=aware(controls.session_opens).isoformat(),
@@ -655,6 +666,42 @@ class SimulationEngine:
         """Explicit full-position local close, sharing the automatic exit claim."""
         return self._manage_exit(contract, controls, now, manual=True, confirmation=confirmation)
 
+    def protect_pending_target(self,key,contract,controls,now):
+        """Latch before cancel and reconcile; retain remaining quantity on recovery."""
+        if not practice_policy(self.policy):return False
+        controls.require_session(now);validate_contract(contract,observed=True)
+        q=contract.snapshot
+        if q.feed!='opra' or q.quote_timestamp is None or not fresh(q.quote_timestamp,now,30) or q.bid<=0 or q.ask<q.bid:
+            raise ExecutionBlocked('EXIT_QUOTE_UNUSABLE')
+        positive_int(q.bid_size);positive_int(q.ask_size)
+        with self.ledger.transaction() as db:
+            if db.execute("SELECT value FROM simulation_settings WHERE key='reconciliation_blocked'").fetchone()[0]=='1':
+                raise ExecutionBlocked('POSITION_RECONCILIATION_REQUIRED')
+            row=db.execute('SELECT * FROM simulated_orders WHERE client_key=?',(key,)).fetchone()
+            if row is None or row['status'] not in ACTIVE:return False
+            order=json.loads(row['payload'])
+            if (order.get('execution_model')!=OBSERVED_MANUAL or order.get('instruction')!='SELL_TO_CLOSE'
+                    or order.get('exit_reason')!='TARGET' or order.get('exit_pricing_policy')!='TARGET_FLOOR_V1'
+                    or order['contract']!=q.symbol):return False
+            if aware(q.quote_timestamp)<=datetime.fromisoformat(order['created_at']):return False
+            position=self.ledger._portfolio(db)[0].get(q.symbol)
+            if not position:return False
+            stop_key='stop_latch:'+position['entry_client_key']
+            latched=db.execute('SELECT value FROM simulation_settings WHERE key=?',(stop_key,)).fetchone()
+            average=position['premium']/(position['quantity']*100)
+            stored=position['plan']
+            plan=ExitPlan(stored['profit_mode'],decimal(stored['target_pct']) if stored['target_pct'] is not None else None,
+                decimal(stored['stop_pct']),stored['max_holding_minutes'],stored['pricing_model'])
+            _,stop=plan.levels(average,None)
+            if latched is None and decimal(q.bid)>stop:return False
+            if not row['broker_id']:raise ExecutionBlocked('POSITION_RECONCILIATION_REQUIRED')
+            broker_id=row['broker_id']
+            db.execute('INSERT OR IGNORE INTO simulation_settings(key,value) VALUES(?,?)',
+                (stop_key,'NEXT_VALID_BID_STOP_V1'))
+        self.broker.acknowledge_cancel(broker_id)
+        self.reconcile(now)
+        return True
+
     def _manage_exit(self, contract, controls, now, *, manual=False, confirmation=None):
         observed = practice_policy(self.policy)
         controls.require_session(now); validate_contract(contract, observed=observed); quote = contract.snapshot
@@ -703,7 +750,9 @@ class SimulationEngine:
                 decimal(plan['target_pct']) if plan['target_pct'] is not None else None,
                 decimal(plan['stop_pct']), plan['max_holding_minutes'], plan.get('pricing_model', 'VERIFIED_TICK'))
             target, stop = exit_plan.levels(average, increment)
-            reason = 'MANUAL_CLOSE' if manual else 'TARGET' if target is not None and decimal(quote.bid) >= target else 'LOSS_LIMIT' if decimal(quote.bid) <= stop else (
+            latched=observed and db.execute('SELECT 1 FROM simulation_settings WHERE key=? AND value=?',
+                ('stop_latch:'+position['entry_client_key'],'NEXT_VALID_BID_STOP_V1')).fetchone() is not None
+            reason = 'MANUAL_CLOSE' if manual else 'LOSS_LIMIT' if latched else 'TARGET' if target is not None and decimal(quote.bid) >= target else 'LOSS_LIMIT' if decimal(quote.bid) <= stop else (
                 'TIME_LIMIT' if plan['max_holding_minutes'] is not None and aware(now) >= datetime.fromisoformat(position['first_fill_at'])+
                 timedelta(minutes=plan['max_holding_minutes']) else None)
             if not reason:
@@ -718,6 +767,10 @@ class SimulationEngine:
                          created_at=aware(now).isoformat(), exit_reason=reason,
                          session_opens=aware(controls.session_opens).isoformat(),
                          session_closes=aware(controls.session_closes).isoformat())
+            if observed and reason=='LOSS_LIMIT':
+                order.update(exit_pricing_policy='NEXT_VALID_BID_STOP_V1',order_type='SIMULATED_MARKET')
+            elif observed and reason=='TARGET':
+                order.update(limit=str(target),exit_pricing_policy='TARGET_FLOOR_V1',order_type='LIMIT')
             key = manual_key or digest(['EXIT', quote.symbol, position['first_fill_at'], len(existing)])
             db.execute('INSERT INTO simulated_orders(client_key,payload,status,created_at) VALUES(?,?,?,?)',
                        (key, encoded(order), 'SUBMITTING', aware(now).isoformat()))

@@ -17,6 +17,9 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
   desconocida o todavía fuera de las bandas actuales no autoriza señal.
 - Ambas bandas se expanden frente a la vela anterior: superior sube e inferior
   baja. Mayor anchura o movimiento de una sola banda no bastan.
+- Decisión28/10: comparar5% de forma observacional manteniendo ACTIVO3%.
+  La comparación no veta ni demora entradas y no cambia órdenes o avisos.
+  [Alcance y límites](ENTRY_BAND_COMPARISON_2026-10-28.md).
 - Actualización autorizada26/10/2026: mínimo **3% por cada banda** respecto
   del ancho anterior, inclusive. Tanto el avance de la superior como el
   descenso de la inferior, divididos por el ancho anterior y multiplicados
@@ -35,6 +38,13 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
   oficial para períodos cerrados, sesión previa y cierre anterior requerido.
 
 ## Recepción y avisos
+
+Actualización29/10/2026 autorizada para ejecución simulada:30s desde el primer
+EXIT auditado por el detector, no desde que la cola esté preparada; sin evidencia
+no se renueva el reloj. Nuevos stops simulados venden al siguiente Bid válido,
+aunque la pérdida supere20%; objetivos mantienen su mínimo de ganancia.
+Cierre manual, estrategia y órdenes reales deshabilitadas se conservan.
+[Políticas, límites y pruebas](EXECUTION_REPAIR_2026-10-29.md).
 
 Actualización autorizada20/10/2026: preparar referencias con premarket y
 after-hours para el gráfico TC2000 del usuario, manteniendo avisos/operaciones
@@ -88,6 +98,24 @@ en selección manual y automática. Rangos de Ask, ITM y demás controles siguen
 vigentes. No cambia incrementos mínimos de cotización ni reglas de salida.
 
 
+Actualización29/10/2026: usuario autoriza tantas compras SIMULADAS como sean
+necesarias para nuevas oportunidades, sin máximo diario elegido. La opción
+«Repetir con señales nuevas después de finalizar cada operación» se muestra
+activada al preparar NUEVAS autorizaciones. Se guarda permiso explícito con
+la fila; no se convierte retrospectivamente una autorización de compra única.
+Cada fila sigue siendo una sola solicitud y conserva su claim. Solo tras
+finalización local confirmada y conciliación, sin posición ni orden pendiente
+en la compañía, se crea una fila sucesora con cantidad/objetivo/rango/tope
+idénticos y referencia nueva. Espera una señal NUEVA posterior; no compra por
+el aviso consumido ni por señales vistas mientras existía exposición. Sin
+rearme tras estado incierto, fuera de sesión, pausa, eliminación o mantenimiento.
+No se traslada al siguiente día. Pausar/eliminar cualquier miembro desactiva
+su permiso y pausa sucesores armados, conservando solicitudes/operaciones.
+La fila anterior queda en historial y se oculta de la cola al crear sucesora.
+Esto sustituye la restricción histórica de compra única solo para autorizaciones
+que incluyen repetición. No hay refuerzos, ampliación de riesgo por compra,
+frescura/ventana renovada para la misma señal ni órdenes reales habilitadas.
+
 Actualización21/10/2026: el usuario autoriza una cola de entradas AUTOMÁTICAS
 solo en SIMULACIÓN LOCAL. Cada compañía requiere sesión oficial, cantidad y
 objetivo elegidos y armado explícito. Una solicitud por fila; caduca al cierre,
@@ -99,6 +127,20 @@ Ask actual dentro del rango/tope de primas mostrado, cantidad x100 xAsk máximo;
 las compras manuales conservan consentimiento exacto de precio. Pausar la cola
 no cierra posiciones ni anula solicitudes ya registradas. Reales OFF. Ver
 [cola y pruebas](AUTOMATIC_ENTRY_QUEUE_2026-10-21.md).
+
+Actualización28/10/2026 autorizada expresamente: la oportunidad de compra
+automática caduca a los **30 segundos**, inclusive, desde el trade de la
+primera señal válida del detector (corrección29/10: antes se contaba desde
+su observación por la cola). Ese inicio se guarda en SQLite
+por identidad de señal; otro trade, retroceso, consulta, plan o reinicio no
+renuevan el plazo. Una señal caducada no compra; la fila puede esperar otra
+señal nueva sin rearmarse ni repetir una compra consumida. La orden de compra
+caduca al menor de10s desde su registro y el fin de esos30s; tampoco se llena
+después de ese límite. Compras parciales conservan su posición y plan de
+salida; solo se cancela el remanente. No afecta a la referencia manual por
+aviso, a las ventas, ni a la detección/notificación de Bollinger. No garantiza
+rentabilidad y puede descartar señales válidas que tardan en tener contrato.
+Ver [ventana y pruebas](SIGNAL_ENTRY_WINDOW_2026-10-28.md).
 
 Actualización23/10/2026: entrada automática con límite máximo al techo del
 rango de primas ya autorizado, sin superar cantidad ni costo máximo de la fila.

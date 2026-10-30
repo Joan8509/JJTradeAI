@@ -14,6 +14,7 @@ from option_exit_plan import (ExitPlan, ExitPlanConfirmation, ManualCloseConfirm
     load_global_exit_policy, require_current_review)
 from option_position_sizing import ManualQuantityConfirmation, manual_entry_cost, _price,require_manual_confirmation
 from option_market_data import _parse_occ_symbol
+from observation_journal import observation_error_code
 from schwab_contracts import decimal, positive_int, price_on_tick
 from schwab_simulation import (_IsolatedDatabase, ACTIVE, DataControls, ExecutionBlocked,
     LocalPaperBroker, SimulationEngine, SimulationLedger, digest, encoded, fresh,
@@ -187,7 +188,7 @@ class ManualWorkflow:
         position,source=self._owned(contract_symbol)
         side=_parse_occ_symbol(contract_symbol.replace(' ',''))[0]
         state=self.read_state(source['underlying'])
-        market=(self.market_data.get_entry_chain(source['underlying'],side,contract_symbol,self.clock(),force=False)
+        market=(self.market_data.get_position_chain(source['underlying'],side,contract_symbol,self.clock(),force=False)
             if getattr(self.market_data,'direct_quotes',False) else
             self.market_data.get_chain(source['underlying'],side,self.clock()))
         now=self.clock()
@@ -208,7 +209,7 @@ class ManualWorkflow:
         state=self.read_state(source['underlying']);controls=self._controls(state)
         controls.require_session(self.clock())
         if market is None:
-            market=self._observation_market(source['underlying'],contract_symbol,force=force)
+            market=self._observation_market(source['underlying'],contract_symbol,force=force,for_position=True)
         now=self.clock();controls.require_session(now)
         contract=next((c for c in market.chain.contracts if c.snapshot.symbol==contract_symbol),None)
         if contract is None:
@@ -315,10 +316,12 @@ class ManualWorkflow:
         if self.engine.reconcile(now)['status']!='RECONCILED':
             raise ExecutionBlocked('POSITION_RECONCILIATION_REQUIRED')
 
-    def _observation_market(self, symbol, contract, *, force=False):
+    def _observation_market(self, symbol, contract, *, force=False, for_position=False):
         """Provider I/O must precede taking the workflow mutation lock."""
         side=_parse_occ_symbol(contract.replace(' ',''))[0]
         self._controls(self.read_state(symbol)).require_session(self.clock())
+        if for_position and getattr(self.market_data,'direct_quotes',False):
+            return self.market_data.get_position_chain(symbol,side,contract,self.clock(),force=force)
         return (self.market_data.get_entry_chain(symbol,side,contract,self.clock(),force=force)
             if getattr(self.market_data,'direct_quotes',False) else
             self.market_data.get_chain(symbol,side,self.clock(),force=force))
@@ -342,8 +345,9 @@ class ManualWorkflow:
             positions=[p for p in self.positions() if p['contract'] not in exiting] if practice_policy(self.engine.policy) else []
         for p in positions:
             try:
-                market=self._observation_market(p['symbol'],p['contract'])
+                market=self._observation_market(p['symbol'],p['contract'],for_position=True)
             except Exception as error:
+                self._position_lookup_failed(p,error)
                 quote_errors.append(error);continue
             with self.lock:
                 if not any(r['contract']==p['contract'] for r in self.positions()):continue
@@ -352,6 +356,7 @@ class ManualWorkflow:
                 try:position,source,c,controls,now=self._exit(p['contract'],market=market)
                 except (ValueError,ExecutionBlocked) as error:
                     quote_errors.append(error);continue
+                self._position_mark_diagnostic(position,source,c)
                 stored=source['plan']
                 plan=ExitPlan(stored['profit_mode'],
                     decimal(stored['target_pct']) if stored['target_pct'] is not None else None,
@@ -386,15 +391,18 @@ class ManualWorkflow:
             if selling:self._exit_diagnostic('LOOKUP_STARTED',row)
             try:
                 market=self._observation_market(order['underlying'],order['contract'],
-                    force=selling or order.get('entry_basis')=='ARMED_LOCAL_QUEUE_V2' and order['instruction']=='BUY_TO_OPEN')
+                    force=selling or order.get('entry_basis')=='ARMED_LOCAL_QUEUE_V2' and order['instruction']=='BUY_TO_OPEN',
+                    for_position=selling)
             except Exception as error:
-                if selling:self._exit_diagnostic('LOOKUP_FAILED',row,lookup_ms=(time.monotonic()-lookup_started)*1000)
+                if selling:self._exit_diagnostic('LOOKUP_FAILED',row,
+                    error_code=observation_error_code(error),lookup_ms=(time.monotonic()-lookup_started)*1000)
                 quote_errors.append(error);continue
             with self.lock:
                 row=self.engine.ledger.order(snapshot['client_key'])
                 if row['status'] not in ACTIVE or not row['broker_id']:continue
                 order=row['order']
-                self._controls(self.read_state(order['underlying'])).require_session(self.clock())
+                controls=self._controls(self.read_state(order['underlying']))
+                controls.require_session(self.clock())
                 contract=next((c for c in market.chain.contracts if c.snapshot.symbol==order['contract']),None)
                 if contract is None:
                     continue
@@ -409,6 +417,13 @@ class ManualWorkflow:
                 if contract.snapshot.quote_timestamp is not None and contract.snapshot.quote_timestamp<=datetime.fromisoformat(order['created_at']):
                     if selling:self._exit_diagnostic('POST_ORDER_QUOTE_REQUIRED',row,contract)
                     continue  # Provider has not published post-order liquidity yet.
+                if selling and order.get('exit_pricing_policy')=='TARGET_FLOOR_V1' and self.engine.protect_pending_target(
+                        row['client_key'],contract,controls,now):
+                    result=self.engine.manage_exit(contract,controls,now)
+                    results.append(result)
+                    if result.get('status') in ('EXIT_WORKING','EXIT_UNCERTAIN'):
+                        self._exit_diagnostic('EXIT_ORDER_REGISTERED',self.engine.ledger.order(result['client_key']),contract)
+                    continue
                 identity=digest(['LOCAL_QUOTE',row['client_key'],contract.snapshot.quote_timestamp])
                 filled=self.engine.broker.match_quote(row['broker_id'],contract,now=now,execution_id=identity)
                 if selling:
@@ -420,20 +435,44 @@ class ManualWorkflow:
             positions=[p for p in self.positions() if p['contract'] not in exiting]
         for position in positions:
             try:
-                market=self._observation_market(position['symbol'],position['contract'])
+                market=self._observation_market(position['symbol'],position['contract'],for_position=True)
             except Exception as error:
+                self._position_lookup_failed(position,error)
                 quote_errors.append(error);continue
             with self.lock:
                 if not any(r['contract']==position['contract'] for r in self.positions()):continue
-                try:_,_,contract,controls,now=self._exit(position['contract'],market=market)
+                try:owned,source,contract,controls,now=self._exit(position['contract'],market=market)
                 except (ValueError,ExecutionBlocked) as error:
                     quote_errors.append(error);continue
+                self._position_mark_diagnostic(owned,source,contract)
                 result=self.engine.manage_exit(contract,controls,now);results.append(result)
                 if result.get('status') in ('EXIT_WORKING','EXIT_UNCERTAIN'):self._exit_diagnostic('EXIT_ORDER_REGISTERED',self.engine.ledger.order(result['client_key']),contract)
         # Healthy exposure was still managed. Unmanaged exposure continues to
         # fail the monitor readiness gate; this never authorizes another buy.
         if quote_errors:raise quote_errors[0]
         return results
+
+    def _position_mark_diagnostic(self,position,source,contract):
+        if self.observation_journal is None:return
+        try:
+            stored=source['plan']
+            plan=ExitPlan(stored['profit_mode'],
+                decimal(stored['target_pct']) if stored['target_pct'] is not None else None,
+                decimal(stored['stop_pct']),stored['max_holding_minutes'],stored['pricing_model'])
+            average=position['premium']/(position['quantity']*100)
+            target,stop=plan.levels(average,None)
+            self._exit_diagnostic('POSITION_MARK',
+                dict(client_key=position['entry_client_key'],order=source),contract,
+                entry_average=average,quantity=position['quantity'],target=target,stop=stop)
+        except Exception:pass
+
+    def _position_lookup_failed(self,position,error):
+        if self.observation_journal is None:return
+        try:
+            self.observation_journal.record('POSITION_LOOKUP_FAILED',at=self.clock(),
+                client_key=position['entry_client_key'],contract=position['contract'],
+                error_code=observation_error_code(error))
+        except Exception:pass
 
     def _exit_diagnostic(self,event,row,contract=None,**metrics):
         if self.observation_journal is None:return
@@ -445,6 +484,7 @@ class ManualWorkflow:
             if contract is not None:
                 q=contract.snapshot
                 fields.update(bid=q.bid,ask=q.ask,quote_at=q.quote_timestamp,
+                    bid_size=q.bid_size,ask_size=q.ask_size,
                     quote_age_ms=(now-q.quote_timestamp).total_seconds()*1000 if q.quote_timestamp else None)
             self.observation_journal.record(event,**fields)
         except Exception:pass  # Optional diagnostics never change trading.

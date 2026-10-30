@@ -10,6 +10,18 @@ class EntryAuxiliaryTests(TestCase):
         self.h=fixtures.AutomaticQueueTests();self.h.setUp();self.addCleanup(self.h.doCleanups)
         self.h.runner.background_entry_auxiliary=True
 
+    def test_optional_signal_and_order_diagnostics_do_not_run_before_dispatch(self):
+        h=self.h;h.arm()
+        with patch.object(h.store,'decision') as write:
+            h.runner.step();write.assert_not_called()
+            self.assertEqual(h.plan()['state'],'SUBMITTED')
+            self.assertTrue(h.f.service.observation_requested.is_set())
+            h.f.quote(seconds=1);h.f.service.observe()
+            self.assertEqual(h.f.engine.ledger.order(h.plan()['client_key'])['status'],'FILLED')
+            while h.runner.drain_auxiliary():pass
+            stages=[call.args[1] for call in write.call_args_list]
+            self.assertIn('SIGNAL_READY',stages);self.assertIn('ORDER_REGISTERED',stages)
+
     def test_catalog_explanation_and_receipt_run_after_durable_dispatch(self):
         h=self.h;h.arm()
         with patch('queue_entry_diagnostics.catalog_check') as check:
@@ -59,3 +71,32 @@ class EntryAuxiliaryTests(TestCase):
         self.assertEqual(h.plan()['state'],'SUBMITTED');self.assertIsNone(h.plan()['intent'])
         self.assertEqual(len(h.f.engine.ledger.orders()),1)
         self.assertTrue(h.f.service.observation_requested.is_set())
+
+    def test_entry_quality_is_after_dispatch_and_records_selected_quote(self):
+        h=self.h;h.arm()
+        with patch('entry_quality_research.execution_observation') as quality:
+            h.runner.step();quality.assert_not_called()
+        self.assertEqual(h.plan()['state'],'SUBMITTED')
+        self.assertTrue(h.f.service.observation_requested.is_set())
+        calls_before=h.f.client.quotes.call_count
+        while h.runner.drain_auxiliary():pass
+        self.assertEqual(h.f.client.quotes.call_count,calls_before)
+        rows=h.store.read("SELECT details_json FROM queue_decisions WHERE stage='ENTRY_QUALITY_OBSERVATION'")
+        self.assertEqual(len(rows),1)
+        import json
+        details=json.loads(rows[0]['details_json'])
+        self.assertFalse(details['entry_gate_enabled'])
+        self.assertIn('selected_bid',details)
+        self.assertIn('selected_ask',details)
+        self.assertIn('spread_pct_ask',details['spread'])
+
+    def test_failed_quality_never_retries_or_changes_dispatched_order(self):
+        h=self.h;h.arm();h.runner.step()
+        with patch('entry_quality_research.execution_observation',side_effect=ValueError('PRIVATE_DETAIL')):
+            while h.runner.drain_auxiliary():pass
+        self.assertEqual(h.plan()['state'],'SUBMITTED')
+        self.assertEqual(h.store.read('SELECT state FROM queue_attempts')[0]['state'],'SUBMITTED')
+        h.f.quote(seconds=1);h.f.service.observe()
+        self.assertEqual(h.f.engine.ledger.order(h.plan()['client_key'])['status'],'FILLED')
+        self.assertEqual(len(h.f.engine.ledger.orders()),1)
+        self.assertNotIn('PRIVATE_DETAIL',str(h.store.read('SELECT * FROM queue_decisions')))

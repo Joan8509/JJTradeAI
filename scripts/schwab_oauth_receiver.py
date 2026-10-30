@@ -18,8 +18,10 @@ LOCAL_CALLBACK = 'https://127.0.0.1:8182/schwab/callback'
 BACKEND_PORT = 8183
 
 
-def handler_for(oauth=None):
-    callback = urlsplit(oauth.config.callback_url if oauth else LOCAL_CALLBACK)
+def handler_for(oauth=None, *, cookie_name='jj_schwab_state',health_callback=LOCAL_CALLBACK):
+    import re
+    if not re.fullmatch(r'[A-Za-z0-9_]{1,64}',cookie_name):raise ValueError('COOKIE_NAME_INVALID')
+    callback = urlsplit(oauth.config.callback_url if oauth else health_callback)
     callback_path = callback.path or '/'
 
     class Handler(BaseHTTPRequestHandler):
@@ -54,14 +56,14 @@ def handler_for(oauth=None):
                 elif path.path == '/schwab/start' and not path.query:
                     location, state = oauth.begin(datetime.now(timezone.utc))
                     self._reply(302, 'Continúa en Schwab.', Location=location,
-                        Set_Cookie='jj_schwab_state='+state+'; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=300')
+                        Set_Cookie=cookie_name+'='+state+'; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=300')
                 elif path.path == callback_path:
                     cookies = SimpleCookie(self.headers.get('Cookie', ''))
-                    cookie = cookies.get('jj_schwab_state')
+                    cookie = cookies.get(cookie_name)
                     oauth.complete(oauth.config.callback_url+('?' + path.query if path.query else ''),
                                    cookie.value if cookie else None, datetime.now(timezone.utc))
                     self._reply(200, 'Cuenta autorizada para comprobación. Órdenes reales deshabilitadas.',
-                        Set_Cookie='jj_schwab_state=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
+                        Set_Cookie=cookie_name+'=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0')
                 else:
                     self._reply(404, 'Ruta no disponible.')
             except Exception:

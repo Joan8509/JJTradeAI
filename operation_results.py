@@ -54,6 +54,7 @@ def read_operation_results(path=LEDGER,*,now=None,account_alias=None):
             created_at=datetime.fromisoformat(row['created_at']),
             plan=dict(order.get('plan') or {}),entry_basis=order.get('entry_basis'),
             execution_model=order.get('execution_model'),
+            entry_band_comparison=order.get('entry_band_comparison'),
             closed_at=datetime.fromisoformat(report['closed_at']) if report and report['status']=='CLOSED' else None,
             status=report['status'] if report else 'OPEN',report=report))
     return dict(entries=entries,pending_requests=pending,available=True)

@@ -12,11 +12,13 @@ import secrets
 import sqlite3
 import time
 from queue import Queue,Empty,Full
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from urllib.parse import urlsplit,urlunsplit
 from zoneinfo import ZoneInfo
 
 from bollinger_phone_worker import canonical_candle
-from automatic_entry_execution import QueuedEntryAuthorization
+from automatic_entry_execution import QueuedEntryAuthorization,signal_entry_deadline
 from opening_preparation import OpeningPreparation
 from manual_trade_service import current_manual_signal, manual_candidates, ManualDataError
 from option_contract_selection import entry_candidates
@@ -87,7 +89,23 @@ class QueueStore(_IsolatedDatabase):
                 CREATE TABLE IF NOT EXISTS queue_control(
                     id INTEGER PRIMARY KEY CHECK(id=1),maintenance INTEGER NOT NULL DEFAULT 0);
                 INSERT OR IGNORE INTO queue_control(id,maintenance) VALUES(1,0);
+                CREATE TABLE IF NOT EXISTS queue_signal_windows(
+                    signal_key TEXT PRIMARY KEY,first_source_at TEXT NOT NULL,
+                    first_observed_at TEXT NOT NULL);
             ''')
+            from automatic_entry_rearm import initialize
+            initialize(db)
+
+    def first_signal_source(self, key, source_at, now):
+        """Immutable opportunity clock, separate from notification dedup/claims."""
+        source=aware(datetime.fromisoformat(source_at)).astimezone(timezone.utc)
+        if source>aware(now):raise ValueError('SIGNAL_ENTRY_CLOCK_INVALID')
+        with self.transaction() as db:
+            db.execute('INSERT INTO queue_signal_windows VALUES(?,?,?) '
+                'ON CONFLICT(signal_key) DO UPDATE SET first_source_at=MIN(first_source_at,excluded.first_source_at)',
+                (key,source.isoformat(),aware(now).isoformat()))
+            first=db.execute('SELECT first_source_at FROM queue_signal_windows WHERE signal_key=?',(key,)).fetchone()[0]
+        return datetime.fromisoformat(first)
 
     def plans(self):
         return self.read('SELECT * FROM queue_plans p WHERE NOT EXISTS '
@@ -137,6 +155,8 @@ class QueueStore(_IsolatedDatabase):
             db.execute('INSERT INTO queue_archives VALUES(?,?,?)',(identity,aware(now).isoformat(),row['state']))
             db.execute("UPDATE queue_plans SET state='PAUSED',reason='REMOVED_BY_USER',updated_at=? WHERE id=? AND state='ARMED'",
                 (aware(now).isoformat(),identity))
+            from automatic_entry_rearm import disable
+            disable(db,identity)
 
     def active(self):
         return self.read("SELECT * FROM queue_plans WHERE state='ARMED' AND NOT EXISTS "
@@ -199,12 +219,13 @@ class QueueStore(_IsolatedDatabase):
     def maintenance(self):
         return self.read('SELECT maintenance FROM queue_control WHERE id=1')[0]['maintenance']==1
 
-    def arm(self, symbol, quantity, target, session_date, *, now, sessions, baseline=None, symbols=None):
+    def arm(self, symbol, quantity, target, session_date, *, now, sessions, baseline=None, symbols=None,repeat=False):
         return self.arm_many([dict(symbol=symbol,quantity=quantity,target=target,baseline=baseline)],
-            session_date,now=now,sessions=sessions,symbols=symbols)[0]
+            session_date,now=now,sessions=sessions,symbols=symbols,repeat=repeat)[0]
 
-    def arm_many(self, selections, session_date, *, now, sessions, symbols=None):
+    def arm_many(self, selections, session_date, *, now, sessions, symbols=None,repeat=False):
         """One explicit batch authorization, all rows or none; no dispatch here."""
+        if type(repeat) is not bool:raise ValueError('QUEUE_SELECTION_INVALID')
         allowed=watched_symbols() if symbols is None else symbols
         if not selections or len(selections)>len(allowed):
             raise ValueError('QUEUE_SELECTION_INVALID')
@@ -219,10 +240,16 @@ class QueueStore(_IsolatedDatabase):
             if db.execute('SELECT maintenance FROM queue_control WHERE id=1').fetchone()[0]:
                 raise ValueError('QUEUE_MAINTENANCE')
             for values in rows:
-                if db.execute("SELECT 1 FROM queue_plans WHERE symbol=? AND session_date=? AND state IN ('ARMED','DISPATCHING','UNCERTAIN')",
+                if db.execute("SELECT 1 FROM queue_plans p WHERE symbol=? AND session_date=? AND "
+                        "(state IN ('ARMED','DISPATCHING','UNCERTAIN') OR (state='SUBMITTED' AND "
+                        "EXISTS(SELECT 1 FROM queue_repeat_permissions r WHERE r.plan_id=p.id AND r.enabled=1) AND "
+                        "NOT EXISTS(SELECT 1 FROM queue_archives a WHERE a.plan_id=p.id)))",
                         (values[1],session_date)).fetchone():
                     raise ValueError('QUEUE_ALREADY_ARMED_OR_UNCERTAIN')
                 db.execute('INSERT INTO queue_plans VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',values)
+                if repeat:
+                    from automatic_entry_rearm import authorize
+                    authorize(db,values[0],now)
         return [values[0] for values in rows]
 
     @staticmethod
@@ -244,6 +271,8 @@ class QueueStore(_IsolatedDatabase):
     def pause(self, identity=None):
         # Pausing does not cancel pending orders, close positions or disable exits.
         with self.transaction() as db:
+            from automatic_entry_rearm import disable
+            disable(db,identity)
             sql = "UPDATE queue_plans SET state='PAUSED',reason='PAUSED_BY_USER' WHERE (state='ARMED' OR (state='PAUSED' AND reason='MAINTENANCE'))"
             db.execute(sql+(' AND id=?' if identity is not None else ''), (identity,) if identity is not None else ())
 
@@ -310,10 +339,15 @@ SAFE_REASONS = {'NO_CURRENT_SIGNAL', 'COLLECTOR_NOT_CURRENT', 'TRADE_NOT_CURRENT
     'MARKET_DATA_COOLDOWN', 'MARKET_DATA_UNAVAILABLE', 'AUTHORIZATION_REQUIRED', 'REAUTHORIZATION_REQUIRED',
     'RATE_LIMITED', 'TRANSPORT_FAILURE', 'HTTP_FAILURE', 'OPTION_CHAIN_INVALID', 'OPTION_CHAIN_NOT_CURRENT',
     'SIGNAL_CHANGED', 'WAITING_NEW_SIGNAL', 'MONITOR_NOT_READY', 'EXISTING_EXPOSURE_NO_REINFORCEMENT',
-    'ENTRIES_PAUSED_OR_UNRECONCILED', 'RANGE_CHANGED_REARM_REQUIRED', 'QUEUE_COST_EXCEEDED', 'DUPLICATE_SIGNAL'}
+    'SIGNAL_ENTRY_WINDOW_EXPIRED','SIGNAL_ENTRY_CLOCK_INVALID','SIGNAL_WINDOW_UNAVAILABLE',
+    'ENTRIES_PAUSED_OR_UNRECONCILED', 'RANGE_CHANGED_REARM_REQUIRED', 'QUEUE_AUTHORIZATION_CHANGED', 'QUEUE_COST_EXCEEDED', 'DUPLICATE_SIGNAL'}
 
 
 class QueueRunner:
+    def rearm_settled(self):
+        from automatic_entry_rearm import rearm_settled
+        return rearm_settled(self)
+
     def __init__(self, workflow, store, *, ready, service=None):
         # Deliberately limited to the local observed-quote engine. No live policy.
         if (type(workflow.engine) is not SimulationEngine or type(workflow.engine.broker) is not LocalPaperBroker
@@ -322,7 +356,11 @@ class QueueRunner:
         if store.path in (workflow.engine.ledger.path, workflow.engine.broker.path, workflow.reviews.path):
             raise ValueError('ISOLATED_QUEUE_REQUIRED')
         self.workflow = workflow; self.store = store; self.ready = ready; self.service = service
+        self.readiness_reason=lambda:'MONITOR_NOT_READY'
         self.cooldown = {}; self.cursor = 0; self.last_attempted_signal = {}
+        self.first_signal_sources={}
+        self.entry_pool=None;self.entry_workers=0;self.entry_jobs={}
+        self.entry_jobs_lock=Lock();self.entries_closed=False;self.entry_worker_errors=0
         self.background_entry_auxiliary=False
         self.auxiliary_jobs=Queue(maxsize=64)
         self.auxiliary_dropped=0;self.auxiliary_errors=0
@@ -338,10 +376,39 @@ class QueueRunner:
             except Exception:
                 store.pause(plan['id'])
 
+    def enable_parallel_entries(self):
+        """Bounded lookups sharing the existing client and transport limiter."""
+        with self.entry_jobs_lock:
+            if self.entries_closed:raise RuntimeError('ENTRIES_CLOSED')
+            if self.entry_pool is None:
+                self.entry_workers=2
+                self.entry_pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix='entry-lookup')
+
+    def close_entries(self):
+        with self.entry_jobs_lock:
+            self.entries_closed=True
+            if self.entry_pool is not None:
+                self.entry_pool.shutdown(wait=False,cancel_futures=True)
+
+    def entry_capacity(self):
+        with self.entry_jobs_lock:
+            # Completed futures are consumed here; no unbounded executor queue.
+            for identity,job in list(self.entry_jobs.items()):
+                if job.done():
+                    if not job.cancelled():
+                        try:job.result()
+                        except Exception:self.entry_worker_errors+=1
+                    del self.entry_jobs[identity]
+            return dict(workers=self.entry_workers,inflight=len(self.entry_jobs),closed=self.entries_closed,
+                errors=self.entry_worker_errors)
+
     def step(self):
+        capacity=self.entry_capacity()
+        if capacity['closed']:return
         now = self.workflow.clock()
         ready = self.ready()
-        self.store.heartbeat(now, 'READY' if ready else 'MONITOR_NOT_READY')
+        self.store.heartbeat(now, 'READY' if ready else self.readiness_reason())
+        if self.entry_pool is not None and capacity['inflight']>=self.entry_workers:return
         plans = self.store.active()
         if not plans:
             return
@@ -349,6 +416,8 @@ class QueueRunner:
         self.cursor += 1
         candidates=[]
         for plan in plans[offset:]+plans[:offset]:
+            with self.entry_jobs_lock:
+                if plan['id'] in self.entry_jobs:continue
             now = self.workflow.clock()
             if now >= datetime.fromisoformat(plan['closes_at']):
                 with self.store.transaction() as db:
@@ -357,7 +426,7 @@ class QueueRunner:
             if now < datetime.fromisoformat(plan['opens_at']):
                 self.store.waiting(plan['id'], 'BEFORE_SESSION', now); continue
             if not ready:
-                self.store.waiting(plan['id'], 'MONITOR_NOT_READY', now); continue
+                self.store.waiting(plan['id'], self.readiness_reason(), now); continue
             try:
                 state = self.workflow.read_state(plan['symbol'])
                 signal = self._signal(plan, state, now)
@@ -373,28 +442,39 @@ class QueueRunner:
         # A fresh candle/side outranks retries; ties retain round-robin order.
         candidates.sort(key=lambda item:not item[0])
         for _,plan,signal in candidates[:1]:
-            now=self.workflow.clock()
-            self.last_attempted_signal[plan['id']]=signal['key']
-            self.cooldown[plan['id']] = now+timedelta(seconds=5)
-            started=time.monotonic()
-            self.store.decision(plan['id'],'SIGNAL_READY',now,details=dict(signal_key=signal['key'],source_at=signal['source_timestamp']))
-            try:
-                self._execute(plan, signal)
-            except Exception as error:
-                code = str(error) if str(error) in SAFE_REASONS else 'CHECK_REQUIRED'
-                self.store.decision(plan['id'],'CHECK_FAILED',self.workflow.clock(),reason=code,
-                    details=dict(elapsed_ms=round((time.monotonic()-started)*1000,3)))
-                self.store.waiting(plan['id'], code, self.workflow.clock())
-                if code in ('TRADE_NOT_CURRENT','COLLECTOR_NOT_CURRENT','SIGNAL_CHANGED','NO_CURRENT_SIGNAL'):
-                    # Only pre-dispatch failures reach here. A new live trade
-                    # can recover promptly; provider errors keep their backoff.
-                    self.cooldown[plan['id']]=self.workflow.clock()+timedelta(seconds=.2)
-            self.store.heartbeat(self.workflow.clock(), 'READY' if self.ready() else 'MONITOR_NOT_READY')
-            return True  # Drain ready work without an artificial post-lookup sleep.
-        # Production warmup runs on its own worker. Never put network warmup
-        # back into the signal-to-order path, even when this scan is idle.
+            if self.entry_pool is not None:
+                with self.entry_jobs_lock:
+                    if self.entries_closed:return
+                    self.entry_jobs[plan['id']]=self.entry_pool.submit(self._attempt_entry,plan,signal)
+            else:
+                self._attempt_entry(plan,signal)
+            return True
+        # Production warmup has a separate worker, never an entry prerequisite.
         if not getattr(self,'background_preparation',False):
             self.opening_preparation.step(plans[offset:]+plans[:offset],ready=ready)
+
+    def _attempt_entry(self,plan,signal):
+        now=self.workflow.clock()
+        self.last_attempted_signal[plan['id']]=signal['key']
+        self.cooldown[plan['id']] = now+timedelta(seconds=5)
+        started=time.monotonic()
+        details=dict(signal_key=signal['key'],source_at=signal['source_timestamp'])
+        if 'entry_band_comparison' in signal:
+            details['entry_band_comparison']=signal['entry_band_comparison']
+        self._decision(plan,'SIGNAL_READY',now,details=details)
+        try:
+            self._execute(plan, signal)
+        except Exception as error:
+            code = str(error) if str(error) in SAFE_REASONS else 'CHECK_REQUIRED'
+            self._decision(plan,'CHECK_FAILED',self.workflow.clock(),reason=code,
+                details=dict(elapsed_ms=round((time.monotonic()-started)*1000,3)))
+            self.store.waiting(plan['id'], code, self.workflow.clock())
+            if code in ('TRADE_NOT_CURRENT','COLLECTOR_NOT_CURRENT','SIGNAL_CHANGED','NO_CURRENT_SIGNAL'):
+                # Only pre-dispatch failures reach here. A new live trade
+                # can recover promptly; provider errors keep their backoff.
+                self.cooldown[plan['id']]=self.workflow.clock()+timedelta(seconds=.2)
+        self.store.heartbeat(self.workflow.clock(), 'READY' if self.ready() else self.readiness_reason())
+        return True  # Drain ready work without an artificial post-lookup sleep.
 
     def _signal(self, plan, state, now):
         tick = current_manual_signal(state, plan['symbol'], now)
@@ -404,7 +484,23 @@ class QueueRunner:
             raise ExecutionBlocked('WAITING_NEW_SIGNAL')
         if tuple(state['session']) != (plan['opens_at'], plan['closes_at']):
             raise ExecutionBlocked('OUTSIDE_OFFICIAL_SESSION')
-        return signal
+        if 'detector_first_at' in state and state['detector_first_at'] is None:
+            raise ExecutionBlocked('SIGNAL_WINDOW_UNAVAILABLE')
+        detector_source=state.get('detector_first_at') or signal['source_timestamp']
+        first=self.first_signal_sources.get(signal['key'])
+        if first is None:
+            try:
+                first=self.store.first_signal_source(signal['key'],detector_source,now)
+            except (sqlite3.Error,OSError):
+                raise ExecutionBlocked('SIGNAL_WINDOW_UNAVAILABLE') from None
+            self.first_signal_sources[signal['key']]=first
+        deadline=signal_entry_deadline(first,now)
+        result=dict(signal,first_signal_at=first.isoformat(),signal_deadline=deadline.isoformat())
+        try:
+            from entry_band_comparison import compare_snapshot
+            result['entry_band_comparison']=compare_snapshot(tick)
+        except Exception:pass
+        return result
 
     def _execute(self, plan, original):
         entry_started=time.monotonic()
@@ -456,7 +552,7 @@ class QueueRunner:
             contract = next((c for c in contracts if c.snapshot.symbol == chosen and any(q.symbol == chosen for q in quotes)), None)
             if contract is None:
                 raise ExecutionBlocked('NO_ELIGIBLE_CONTRACTS')
-            if not self.ready() or (getattr(w, 'entry_ready', None) is not None and not w.entry_ready()):
+            if self.entries_closed or not self.ready() or (getattr(w, 'entry_ready', None) is not None and not w.entry_ready()):
                 raise ExecutionBlocked('MONITOR_NOT_READY')
             policy = w._policy(); w._reconcile(now)
             cost = manual_entry_cost(contract.snapshot.ask, plan['quantity'], policy.fee_per_contract)
@@ -473,6 +569,12 @@ class QueueRunner:
                 current = db.execute('SELECT * FROM queue_plans WHERE id=?', (plan['id'],)).fetchone()
                 if not current or current['state'] != 'ARMED':
                     return
+                # Pause/rearm or editing during REST cannot authorize an old
+                # quantity/target snapshot, even when the same row is ARMED.
+                authorization=('armed_at','quantity','target','low','high','max_cost',
+                    'opens_at','closes_at','baseline_key')
+                if any(current[field]!=plan[field] for field in authorization):
+                    raise ExecutionBlocked('QUEUE_AUTHORIZATION_CHANGED')
                 inserted = db.execute("INSERT OR IGNORE INTO queue_attempts(signal_key,plan_id,state,claimed_at) VALUES(?,?,'CLAIMED',?)",
                     (signal['key'], plan['id'], now.isoformat())).rowcount
                 if not inserted:
@@ -490,17 +592,18 @@ class QueueRunner:
                 final_signal = self._signal(plan, state, dispatch_now)
                 if final_signal['key'] != signal['key']:
                     raise ExecutionBlocked('SIGNAL_CHANGED')
-                if not self.ready():
+                if self.entries_closed or not self.ready():
                     raise ExecutionBlocked('MONITOR_NOT_READY')
                 key = w.engine.enter(state['tick'], state['runtime'], w._controls(state), contract,
                     datetime.fromisoformat(state['tick']['source_timestamp']), dispatch_now,
                     listed_expirations=market.expirations, strike_inventory=market.strike_inventory, manual_confirmation=confirmation,
                     exit_confirmation=ExitPlanConfirmation(confirmation, exit_plan, now),
                     queued_authorization=QueuedEntryAuthorization(
-                        symbol,plan['quantity'],decimal(plan['high']),decimal(plan['max_cost'])))
+                        symbol,plan['quantity'],decimal(plan['high']),decimal(plan['max_cost']),
+                        datetime.fromisoformat(final_signal['first_signal_at'])))
                 result = dict(status=w.engine.ledger.order(key)['status'], client_key=key)
                 registered=w.clock()
-                self.store.decision(plan['id'],'ORDER_REGISTERED',registered,details=dict(status=result['status'],
+                self._decision(plan,'ORDER_REGISTERED',registered,details=dict(status=result['status'],
                     workflow_lock_wait_ms=workflow_lock_wait_ms,
                     processing_ms=round((time.monotonic()-entry_started)*1000,3),
                     source_to_order_ms=round((registered-datetime.fromisoformat(original['source_timestamp'])).total_seconds()*1000,3),
@@ -522,9 +625,15 @@ class QueueRunner:
         # display receipt. Never classify a presentation failure as uncertainty
         # about whether the local order was dispatched.
         self._auxiliary(('receipt',plan,signal,contract,cost,result,now))
+        # Optional learning evidence only, after the order is durable and the
+        # monitor was woken. No history/provider access or gate on the entry.
+        self._auxiliary(('entry_quality',plan,state['tick'],contract,final_signal,registered,exit_plan.stop_loss_pct))
 
     def _catalog_diagnostic(self,plan,stage,market,at,**measurements):
         self._auxiliary(('catalog',plan,stage,market,at,measurements))
+
+    def _decision(self,plan,stage,at,*,reason=None,details=None):
+        self._auxiliary(('decision',plan['id'],stage,at,reason,details))
 
     def _auxiliary(self,job):
         if self.background_entry_auxiliary:
@@ -541,11 +650,22 @@ class QueueRunner:
 
     def _run_auxiliary(self,job):
         try:
-            if job[0]=='catalog':
+            if job[0]=='decision':
+                _,identity,stage,at,reason,details=job
+                self.store.decision(identity,stage,at,reason=reason,details=details)
+            elif job[0]=='catalog':
                 _,plan,stage,market,at,measurements=job
                 from queue_entry_diagnostics import catalog_check
                 details=catalog_check(market,plan['symbol'],market.side,at)
                 self.store.decision(plan['id'],stage,at,details=dict(details,**measurements))
+            elif job[0]=='entry_quality':
+                _,plan,tick,contract,signal,registered,stop_pct=job
+                from entry_quality_research import execution_observation
+                details=execution_observation(tick,contract.snapshot,
+                    stop_pct=stop_pct,
+                    target_pct=None if plan['target']=='MANUAL' else plan['target'],
+                    dispatched_at=registered,first_signal_at=signal['first_signal_at'])
+                self.store.decision(plan['id'],'ENTRY_QUALITY_OBSERVATION',registered,details=details)
             else:
                 _,plan,signal,contract,cost,result,now=job
                 intent=self._receipt(plan,signal,contract,cost,result,now)

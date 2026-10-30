@@ -918,6 +918,23 @@ def _stored_bool(value: Any) -> bool | None:
     return None if value is None else bool(value)
 
 
+def save_data_only_preview(database, bar, *, feed, already_persisted):
+    """Optional display projection; never acknowledge an uncommitted bar."""
+    from indexed_bollinger_preview import preview_for_bar
+    try:
+        preview = preview_for_bar(database, bar, feed=feed)
+        LiveBollingerPreviewRepository(database).save(preview)
+    except sqlite3.OperationalError as error:
+        code = getattr(error, 'sqlite_errorcode', None)
+        if not already_persisted or not isinstance(code, int) or code & 255 not in (
+                sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise
+        from bollinger_tick_stream import record_ingest_failure
+        record_ingest_failure(database, 'OPTIONAL_PREVIEW_BUSY', error)
+        return False
+    return True
+
+
 def monitor_scanner_shutdown(supervisor, finished, stop_file, owner_token, realtime_worker=None):
     """Stop a failed ingest even on a quiet socket, so task supervision can recover."""
     while not finished.wait(1.0):
@@ -1070,7 +1087,8 @@ def main() -> int:
 
     def handle_bar(bar: MarketBar) -> None:
         if bar.symbol not in symbols:
-            continuity.ingest_live_bar(bar)
+            if realtime_worker is None:
+                continuity.ingest_live_bar(bar)
             return
         try:
             if args.data_only:
@@ -1079,9 +1097,8 @@ def main() -> int:
                 # Only nineteen official closes plus the observed partial close
                 # contribute to this display. Do not rebuild seven days of
                 # Pandas/Arrow frames in the shared trade interpreter per bar.
-                from indexed_bollinger_preview import preview_for_bar
-                preview = preview_for_bar(args.database, bar, feed=config.feed)
-                LiveBollingerPreviewRepository(args.database).save(preview)
+                save_data_only_preview(args.database, bar, feed=config.feed,
+                                       already_persisted=realtime_worker is not None)
                 return
             result = scanner.on_bar(bar,already_persisted=realtime_worker is not None)
         except Exception as error:

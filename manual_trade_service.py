@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 from threading import Lock
+from collections import OrderedDict
 import time
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,35 @@ from schwab_contracts import normalize_chain
 
 UTC=timezone.utc
 NY=ZoneInfo('America/New_York')
+_detector_first_cache=OrderedDict()
+
+
+def detector_first_source(db,database,tick,*,cache=None):
+    """Bounded indexed evidence lookup once per candle/side, never an API call.
+
+    Do not renew a signal merely because the queue was not ready to see it.
+    Refuse incomplete/pruned evidence rather than starting a new clock.
+    """
+    if cache is None:cache=_detector_first_cache
+    if not tick or not tick.get('signal'):return None
+    # Production candles inherit ET from the official calendar, while the
+    # audit index stores UTC ISO text. SQLite compares TEXT lexically, not
+    # instants: normalize bounds AND cache identity before the indexed query.
+    signal=tick['signal'];candle=aware(datetime.fromisoformat(signal['candle']))
+    key=(str(database),tick['symbol'],candle.isoformat(),signal['side'],tick.get('version'))
+    if key in cache:return cache[key]
+    oldest=db.execute('SELECT received_at FROM bollinger_tick_audit ORDER BY received_at LIMIT 1').fetchone()
+    if not oldest or datetime.fromisoformat(oldest[0])>candle:return None
+    row=db.execute("SELECT source_timestamp FROM bollinger_tick_audit WHERE received_at>=? AND received_at<? "
+        "AND symbol=? AND reason='EXIT' AND json_extract(message_json,'$._jjtrade.geometry.side')=? "
+        "ORDER BY received_at LIMIT 1",(candle.isoformat(),(candle+timedelta(minutes=15)).isoformat(),
+            tick['symbol'],signal['side'])).fetchone()
+    if row is None:return None
+    first=datetime.fromisoformat(row[0].replace('Z','+00:00'))
+    if not candle<=first<candle+timedelta(minutes=15):return None
+    if len(cache)>=512:cache.popitem(last=False)
+    cache[key]=first.isoformat()
+    return first.isoformat()
 
 
 class ManualDataError(RuntimeError):
@@ -39,9 +69,13 @@ def read_manual_state(database, symbol, session_date):
             runtime=db.execute('SELECT state,heartbeat,feed,symbols_json FROM bollinger_tick_runtime WHERE id=1').fetchone()
             tick=db.execute('SELECT payload_json FROM bollinger_tick_latest WHERE symbol=?',(symbol,)).fetchone()
             radar=db.execute('SELECT payload_json FROM bollinger_radar_state WHERE symbol=?',(symbol,)).fetchone()
+            decoded_tick=json.loads(tick[0]) if tick else None
+            try:first_source=detector_first_source(db,database,decoded_tick)
+            except (sqlite3.Error,ValueError,TypeError,KeyError):first_source=None
         return {'session':session,'runtime':None if runtime is None else dict(
             state=runtime[0],heartbeat=runtime[1],feed=runtime[2],symbols=json.loads(runtime[3])),
-            'tick':json.loads(tick[0]) if tick else None,'radar':json.loads(radar[0]) if radar else None}
+            'tick':decoded_tick,'radar':json.loads(radar[0]) if radar else None,
+            'detector_first_at':first_source}
     except (sqlite3.Error,OSError,ValueError,TypeError):
         raise ManualDataError('SIGNAL_STATE_UNAVAILABLE') from None
 
@@ -144,6 +178,7 @@ def manual_candidates(state,market,symbol,side,now):
 
 
 MARKET_CACHE_REVISION='nonblocking_market_cache_v1'
+POSITION_QUOTE_REVISION='owned_contract_quote_v1'
 
 
 class ManualMarketData:
@@ -151,11 +186,45 @@ class ManualMarketData:
     def __init__(self,client,*,verified_increments=None,fee_per_contract=None,direct_quotes=False):
         self.client=client;self.increments=verified_increments or {};self.fee_per_contract=fee_per_contract
         self.lock=Lock();self.cache={};self.retry_at=None;self.catalog_cache={};self.direct_quotes=direct_quotes;self.selected_cache={}
+        self.position_cache={}
+        self.scoped_retries={};self.error_counts={}
 
-    def _record_retry(self, now, error):
-        retry=aware(now)+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
+    @staticmethod
+    def _response_error(error):
+        return (not isinstance(error,SchwabError) and
+            (isinstance(error,(ValueError,TypeError,KeyError,OverflowError)) or
+             isinstance(error,ManualDataError) and str(error)=='OPTION_CHAIN_INVALID'))
+
+    def _record_retry(self, now, error, scope=None):
+        local=scope is not None and self._response_error(error)
+        seconds=1 if local and scope[0]=='position' else 15
+        retry=aware(now)+timedelta(seconds=max(seconds,getattr(error,'retry_after_seconds',None) or 0))
         with self.lock:
-            if self.retry_at is None or retry>self.retry_at:self.retry_at=retry
+            # A malformed response/identity for one instrument is not evidence
+            # of a provider-wide outage. HTTP/auth/transport/unknown failures
+            # remain shared and retain the full provider Retry-After.
+            if local:
+                if scope not in self.scoped_retries and len(self.scoped_retries)>=512:
+                    self.scoped_retries.pop(next(iter(self.scoped_retries)))
+                self.scoped_retries[scope]=max(self.scoped_retries.get(scope,retry),retry)
+            elif self.retry_at is None or retry>self.retry_at:self.retry_at=retry
+
+    def _retry_locked(self,now,scope):
+        if ((self.retry_at is not None and aware(now)<self.retry_at)
+                or aware(now)<self.scoped_retries.get(scope,aware(now))):
+            raise ManualDataError('MARKET_DATA_COOLDOWN')
+
+    def _failure(self,now,error,scope):
+        self._record_retry(now,error,scope)
+        allowed={'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
+                 'TRANSPORT_FAILURE','HTTP_FAILURE'}
+        code=error.code if isinstance(error,SchwabError) and error.code in allowed else 'MARKET_DATA_UNAVAILABLE'
+        cause=code if code!='MARKET_DATA_UNAVAILABLE' else (
+            'OPTION_RESPONSE_INVALID' if self._response_error(error) else
+            'TRANSPORT_FAILURE' if isinstance(error,(TimeoutError,ConnectionError)) else 'MARKET_DATA_UNAVAILABLE')
+        with self.lock:self.error_counts[cause]=self.error_counts.get(cause,0)+1
+        failure=ManualDataError(code);failure.cause_code=cause
+        return failure
 
     @staticmethod
     def _publish(cache, key, result):
@@ -195,7 +264,7 @@ class ManualMarketData:
         if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
             raise ManualDataError('OPTION_SEARCH_INVALID')
         with self.lock:
-            if self.retry_at is not None and aware(now)<self.retry_at:raise ManualDataError('MARKET_DATA_COOLDOWN')
+            self._retry_locked(now,('catalog',symbol,side))
             complete=self.cache.get((symbol,side))
             calendar_age=timedelta(minutes=5) if self.direct_quotes else timedelta(seconds=30)
             use_full=complete is None or not timedelta(0)<=aware(now)-complete.fetched_at<=calendar_age
@@ -209,8 +278,7 @@ class ManualMarketData:
             raw=self.client.chain(symbol,side,expiry,expiry,now)
             partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
         except Exception as error:
-            self._record_retry(now,error)
-            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+            raise self._failure(now,error,('catalog',symbol,side)) from None
         result=ManualChain(symbol,side,complete.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
         with self.lock:self._publish(self.catalog_cache,(symbol,side,expiry),result)
         return result
@@ -227,8 +295,7 @@ class ManualMarketData:
         if self.direct_quotes is not True:raise ManualDataError('OPTION_SEARCH_INVALID')
         now=aware(now)
         with self.lock:
-            if self.retry_at is not None and now<self.retry_at:
-                raise ManualDataError('MARKET_DATA_COOLDOWN')
+            self._retry_locked(now,('catalog',symbol,side))
             old=self.cache.get((symbol,side))
             if old and timedelta(0)<=now-old.fetched_at<timedelta(minutes=4):return old
         try:
@@ -236,10 +303,7 @@ class ManualMarketData:
             result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
             select_entry_expiration(result.expirations,now)
         except Exception as error:
-            retry=now+timedelta(seconds=max(15,getattr(error,'retry_after_seconds',None) or 0))
-            with self.lock:
-                if self.retry_at is None or retry>self.retry_at:self.retry_at=retry
-            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+            raise self._failure(now,error,('catalog',symbol,side)) from None
         with self.lock:
             current=self.cache.get((symbol,side))
             if current is None or current.fetched_at<result.fetched_at:
@@ -251,20 +315,49 @@ class ManualMarketData:
         if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
             raise ManualDataError('OPTION_SEARCH_INVALID')
         with self.lock:
-            if self.retry_at is not None and aware(now)<self.retry_at:
-                raise ManualDataError('MARKET_DATA_COOLDOWN')
+            self._retry_locked(now,('catalog',symbol,side))
             old=self.cache.get((symbol,side))
             if not force and old and timedelta(0)<=aware(now)-old.fetched_at<timedelta(seconds=5):return old
         try:
             raw=self.client.full_chain(symbol,side,now)
             result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
         except Exception as error:
-            self._record_retry(now,error)
-            allowed={'AUTHORIZATION_REQUIRED','REAUTHORIZATION_REQUIRED','RATE_LIMITED',
-                     'TRANSPORT_FAILURE','HTTP_FAILURE'}
-            code=error.code if isinstance(error,SchwabError) and error.code in allowed else 'MARKET_DATA_UNAVAILABLE'
-            raise ManualDataError(code) from None
+            raise self._failure(now,error,('catalog',symbol,side)) from None
         with self.lock:self._publish(self.cache,(symbol,side),result)
+        return result
+
+    def get_position_chain(self,symbol,side,contract_symbol,now,*,force=True):
+        """Refresh an owned contract without requiring a new entry calendar.
+
+        Only immutable, provider-verified identity is reused. Prices, reference,
+        real-time flag and trading status come from a new batched quote. Never
+        publish this result into entry caches or extend entry-calendar validity.
+        The workflow calls this only for filled exposure / pending sells.
+        """
+        if not self.direct_quotes:
+            return self.get_entry_chain(symbol,side,contract_symbol,now,force=force)
+        if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
+            raise ManualDataError('OPTION_SEARCH_INVALID')
+        with self.lock:
+            self._retry_locked(now,('position',symbol,side,contract_symbol))
+            cached=self.position_cache.get((symbol,side,contract_symbol))
+            if not force and cached and timedelta(0)<=aware(now)-cached.fetched_at<timedelta(seconds=1):
+                return cached
+            known=[cached,self.cache.get((symbol,side)),self.selected_cache.get((symbol,side,contract_symbol))]
+            known += [value for (root,option,_),value in self.catalog_cache.items() if (root,option)==(symbol,side)]
+            identity=next((m for m in known if m is not None and
+                (m.symbol,m.side)==(symbol,side) and any(c.snapshot.symbol==contract_symbol for c in m.chain.contracts)),None)
+        if identity is None:
+            # Cold recovery still obtains verified metadata; never synthesize
+            # a contract from an order string or silently reuse unknown identity.
+            identity=self.get_chain(symbol,side,now,force=True)
+        try:
+            from selected_option_quotes import refresh_selected
+            payload=self.client.quotes([symbol,contract_symbol],now)
+            result=refresh_selected(identity,contract_symbol,payload,aware(now))
+        except Exception as error:
+            raise self._failure(now,error,('position',symbol,side,contract_symbol)) from None
+        with self.lock:self._publish(self.position_cache,(symbol,side,contract_symbol),result)
         return result
 
     def get_entry_chain(self,symbol,side,contract_symbol,now,*,force=True):
@@ -306,7 +399,7 @@ class ManualMarketData:
                         selected=next((c for c in catalog.chain.contracts if c.snapshot.symbol==contract_symbol),None)
                         if selected is not None:break
                 if selected is None:raise ManualDataError('CONTRACT_NO_LONGER_ELIGIBLE')
-                if self.retry_at is not None and aware(now)<self.retry_at:raise ManualDataError('MARKET_DATA_COOLDOWN')
+                self._retry_locked(now,('entry',symbol,side,contract_symbol))
         if use_full:return self.get_chain(symbol,side,now,force=True)
         try:
             expiry=selected.snapshot.expiration
@@ -321,8 +414,7 @@ class ManualMarketData:
             raw=self.client.chain(symbol,side,expiry,expiry,now)
             partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
         except Exception as error:
-            self._record_retry(now,error)
-            raise ManualDataError('MARKET_DATA_UNAVAILABLE') from None
+            raise self._failure(now,error,('entry',symbol,side,contract_symbol)) from None
         return ManualChain(symbol,side,old.expirations,partial.chain,partial.fetched_at,partial.strike_inventory)
 
 

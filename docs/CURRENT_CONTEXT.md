@@ -1,77 +1,69 @@
 # Continuidad de JJTrade AI
 
-Actualizado 27/10/2026 ET. Mejoras guardadas en GitHub main; código
-7e613b547fd9c2ea7e7cd7ff8c2789f4b2f9ba14, SHA remoto igual comprobado19:49ET.
-Instrucciones actuales del usuario prevalecen. Leer AGENTS.md y
-docs/GITHUB_CHECKPOINT_2026-10-27.md; consultar Git antes de modificar.
-Los diarios operativos locales docs/SESSION_STATE_*.md y la continuidad extensa
-conservada en exports/trade_review/2026-10-27_github_checkpoint/ no se publican.
+Checkpoint técnico del 30/10/2026, solicitado por el usuario para GitHub.
+La continuidad operativa completa anterior se conserva localmente en
+exports/trade_review/2026-10-30_no_entries/github_checkpoint/ y en los diarios
+docs/SESSION_STATE_*.md. No se elimina al publicar este resumen sin datos privados.
+Consultar docs/GITHUB_CHECKPOINT_2026-10-30.md y STRATEGY_OPERATING_CONTRACT.md.
 
-## Estrategia y controles
+Guardado GitHub en preparación por petición expresa del usuario30/10:
+146testsOK75,292s y diff --check sin errores. Paquete revisado sin hallazgos
+de secretos/identificadores privados en59archivos seleccionados. Publicación
+y SHAremoto requieren verificación; no inferirlos del commit local.
 
-Solo SIMULACIÓN LOCAL con cotizaciones Schwab; no es paperMoney. Perfil
-MARKET_DATA_ONLY, órdenes reales OFF. No iniciar otro colector por clonar Git.
-Bollinger15m20/2ddof0:19cierres previos+trade conocido, sin cierre futuro.
-Apertura real de misma vela dentro de bandas DEL MOMENTO DE SALIDA, versión
-v5_apertura_dentro_bandas_actuales. Ambas bandas expanden>=3% CADA UNA sobre
-ancho previo; direcciones de precio/apertura/media conservadas. Ver
-STRATEGY_OPERATING_CONTRACT.md y DYNAMIC_OPENING_BANDS_2026-10-26.md.
-IEX/REGULAR, trade3s, opciones/spot30s, correcciones/cuarentena/calendario.
-Extendida pendiente de cobertura; gráficos externos no son equivalentes por defecto.
-CALLsuperior/PUTinferior; ITM o primeros5strikesOTM inclusive, ATMexcluido.
-Ask en rango aprobado, spread<=0.08. Vencimiento listado más próximo;
-después14ET salta el mismo día. AAPLAsk0.45–0.95, otras52referencias iguales;
-19símbolos en radar, SPCX sin rango aprobado. Ver config/option_price_ranges.csv.
-Nuevos planes stop20%, objetivos10/20/35/100/manual; planes anteriores inmutables.
+## Estrategia y autorizaciones vigentes
 
-## Entrada, salida y notificaciones
+Simulación local con cotizaciones de mercado; no es paperMoney de Schwab.
+Órdenes reales deshabilitadas. Preparación de cuenta real pausada por el usuario;
+el módulo nuevo es exclusivamente de lectura, sin permisos de despacho.
+Clonar GitHub no restaura cuentas, bases, tokens, tareas ni una instalación activa.
+No iniciar una segunda instancia ni inferir configuración privada desde el código.
 
-Fila explícita compañía/cantidad/objetivo/sesión; una compra por autorización.
-Claim durable antes de dispatch; incertidumbre nunca se reintenta. Entrada
-automática al techo de rango autorizado, fill al Ask posterior con tamaño,
-caducidad10s del remanente. Pausa/consentimiento/revalidación no se omiten.
-Señales nuevas tienen prioridad; consultas REST fuera de locks compartidos,
-calendarios preparados, caché subsegundo solo con tiempos originales válidos.
-Informes/recibos MiniApp separados de compra; registro y monitor no esperan UI.
-Ventas pendientes tienen prioridad/GETnuevo, sin consultas redundantes de posición.
-Salida exige quote posterior, tamaño, Bid>=límite y sesión/conciliación válidos.
-La venta conserva límite del Bid que disparó; otro Bid>=objetivo pero inferior
-al límite puede esperar. Cambiar esa política no está aplicado; el stop tampoco
-garantiza pérdida exacta. Journal privado asíncrono y acotado de no-match/latencia.
-Ejecución, seguimiento y Telegram independientes. Avisos de estrategia sin
-botones; avisos de compra/cierre solo con fills confirmados y enlace dashboard.
-Preservar154dedup originales, incluidos16inciertos, aliases e identidades;
-nunca reenviar históricos ni rearmar automáticamente filas consumidas.
+Bollinger v5: 15 minutos, 20 períodos, desviación2, ddof0. Apertura real de la
+misma vela dentro de las bandas del momento de detección, ambas expandiéndose
+al menos3% cada una sobre el ancho previo. Comparar5% sigue siendo observacional.
+CALLsuperior/PUTinferior; estrategia intravela, sin esperar cierre. IEX/REGULAR;
+alineación extendida pendiente de cobertura. Trade3s y opciones/spot30s.
+ITM o primeros5strikesOTM inclusive, ATMexcluido; Ask en rango aprobado,
+spread máximo0.08; vencimiento más próximo, después14ET omitir mismo día.
+Stop20%; objetivos10/20/35/100/manual. Datos/contratos no aptos siguen bloqueados.
 
-## Interfaz y conexión
+## Ejecución y reloj
 
-Tres pestañas: Estrategia en Vivo, Operar Automáticamente, Mis operaciones.
-Edición por lotes, objetivos/cantidades comunes o individuales, borrador y
-consentimiento; guardado atómico tras GETSchwab nuevo. Indicador de conexión
-en fondo, caducidad basada en checked_at; editar no pausa entradas. Sin
-refresco automático al editar; seguimiento visual opcional. Fondo estático,
-ancho móvil y referencias descriptivas de resultados, sin aprendizaje decisor.
-Tokens DPAPIAdministrator, refresh porAPI; pestaña de login web no acelera.
-Nueva autorización interactiva en navegadorVPS por callback127.0.0.1.
-Watchdog preventivo implementado; tarea persistente no acreditada, comprobar
-antes de declararla activa. No automatizar contraseñas/MFA ni prometer renovación perpetua.
+Ventana30s desde el primer EXIT auditado de símbolo/vela/dirección; persistente,
+no se renueva por nuevos trades, avisos tardíos, planes o reinicios. La consulta
+SQLite normaliza la vela ET a UTC antes de comparar texto indexado. Evidencia
+incompleta/podada no permite inventar un inicio. Comprobación de arranque con
+SQLite en memoria/caché aislada: ET invierno/verano, primera hora inmutable y
+rechazo de ausencia de evidencia. Fallo detiene solo nuevas entradas automáticas
+con motivo explícito; la gestión de posiciones y salidas conserva su monitor.
 
-## Validación, estado y siguientes pasos
+Dos búsquedas de contrato como máximo, una por plan, coordinador200ms y mismo
+transporte/backoff. Claim durable y revalidación antes de despacho. Diagnóstico
+opcional después del registro; no retrasa compra. Una solicitud por fila;
+nuevas colas con consentimiento explícito de repetición pueden rearmarse tras
+conciliación/cierre y solo para otra señal nueva. Incertidumbre nunca se reintenta.
+Pausar/eliminar detiene sucesores, sin cancelar posiciones o ventas existentes.
 
-Las revisiones de entradas/salidas/UI tienen pruebas aisladas y recibos locales.
-CheckpointGit solicitado:355testsOK158.411s; paquete revisado sin claves,
-cuentas o bases privadas. Publicación del código confirmada contra SHAremoto;
-este recibo de continuidad se conserva en un commit documental posterior.
-Última carga comprobada27Oct19:09ET: background_entry_presentation_v1,
-fresh_pending_exit_quotes_v1, nonblocking_market_cache_v1 y
-network_outside_workflow_lock_v1. HTTP200/monitorREADY y autenticaciónTelegram
-comprobados19:09:40ET; esto no demuestra estado presente o recepción futura.
-Rangos actualizados19:35ET por lectura directaCSV, sin reinicio.
-Guardar en Git no reinicia servicios ni ejecuta órdenes o avisos.
-Falta medir tiempos con mercado abierto tras últimas cargas; no prometer
-ganancias ni atribuir toda demora histórica a un solo fallo. No hay serie
-completa de cotizaciones de opciones de los casos anteriores. Mantener
-los controles cuando falten datos/contratos o conexión. Pruebas de recuperación,
-reinicioWindows/RDP y cobertura extendida pendientes; no reiniciar por este guardado.
-Credenciales, cuentas, bases, respaldos, infraestructura y operaciones privadas
-se conservan locales; los datos y herramientas privadas no se suben a GitHub.
+Stop simulado al siguiente Bid válido, sin garantizar pérdida máxima20%; objetivo
+con mínimo del porcentaje elegido. Objetivo pendiente que alcanza stop conserva
+disparo durable, cancelación confirmada y conciliación del remanente. No modifica
+fills antiguos. Avisos de estrategia sin botones; compra/cierre solo con fills
+confirmados y enlace. Mantener deduplicación y envíos inciertos, sin replay.
+
+## Interfaz, datos y límites
+
+Tres pestañas y edición por lotes; guardado con consentimiento y comprobación de
+conexión. Módulo de cuenta en lectura con vaultDPAPI separado, selección explícita,
+sin fallback al de datos, OAuthloopback8186/8187; MiniApp8184 intacta. No consultas
+de cuenta al abrir ni habilitación de órdenes. Requiere configuración/consentimiento
+del usuario cuando reanude esa preparación. No automatizar contraseñas ni MFA.
+Worker ordenado y acotado para guardar velas oficiales; no inventar referencias.
+Memoria y estudios descriptivos no cambian reglas ni garantizan rentabilidad.
+
+La corrección del reloj y protección se cargaron y comprobaron el30/10; último
+corte operativo13:18ET con heartbeats y rutas de salud recientes. Esto no acredita
+estado actual ni compra nueva completa tras la corrección. Verificar procesos,
+conexión y trazabilidad señal→contrato→registro→fill antes de afirmar funcionamiento.
+Pendientes: verificar nueva entrada, estudiar retrasos particulares con evidencia,
+cobertura extendida y recuperación/reinicio de VPS. No reiniciar para este guardado.

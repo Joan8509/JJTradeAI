@@ -53,7 +53,8 @@ class PositionCardPublisher:
                 data=w.market_data
                 if data.lock.acquire(blocking=False):
                     try:
-                        caches=[data.selected_cache.get((p['symbol'],p['side'],p['contract'])),
+                        caches=[getattr(data,'position_cache',{}).get((p['symbol'],p['side'],p['contract'])),
+                            data.selected_cache.get((p['symbol'],p['side'],p['contract'])),
                             data.cache.get((p['symbol'],p['side']))]
                     finally:data.lock.release()
                     choices=[(c,cached) for cached in caches if cached is not None for c in cached.chain.contracts

@@ -46,6 +46,9 @@ def record_ingest_revision(database):
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_text(json.dumps({'utc': datetime.now(UTC).isoformat(),
             'pid': os.getpid(), 'revision': 'sqlite_wal_publisher_v5',
+            'timing_revision': 'ingest_stage_timing_v1',
+            'bar_storage_revision': 'ordered_async_bar_storage_v1',
+            'reference_scope_fence_revision': 'scoped_pending_references_v1',
             'strategy_version': STRATEGY_VERSION,
             'source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'minimum_band_expansion_pct': MINIMUM_BAND_EXPANSION_PCT,
@@ -55,6 +58,22 @@ def record_ingest_revision(database):
         temporary.replace(path)
     except OSError:
         pass  # Receipt contention must not stop market reception.
+
+
+def ingest_timing_snapshot(worker):
+    """Safe stage counters, no payloads, account data or exception bodies."""
+    stage, entered = worker.active_stage
+    return dict(utc=datetime.now(UTC).isoformat(), pid=os.getpid(),
+        revision='ingest_stage_timing_v1', stage=stage,
+        stage_seconds=max(0., time.monotonic()-entered),
+        queue_depth=worker.queue.qsize(), analysis_depth=worker.analysis.qsize(),
+        state=worker.state, failed=worker.failed.is_set(),
+        max_seconds=dict(worker.max_stage_seconds),
+        last_trade_queue_seconds=worker.last_trade_queue_seconds,
+        bar_storage_revision='ordered_async_bar_storage_v1',
+        persistence_depth=worker.persistence.qsize(),
+        persistence_stage=worker.persistence_stage[0],
+        persistence_stage_seconds=max(0.,time.monotonic()-worker.persistence_stage[1]))
 
 
 def record_ingest_failure(database, stage, error):
@@ -159,6 +178,21 @@ class TickGeometry:
         self.seen = OrderedDict()
         self.missed_openings = set()
         self.session_key = self.session = None
+        self.reference_windows = {}
+
+    def bar_affects_reference(self,bar,candle):
+        if bar.timestamp==candle:return True
+        if bar.timestamp>candle:return False
+        windows=self.reference_windows.get(candle)
+        if windows is not None:
+            return any(start<=bar.timestamp<end for start,end in windows)
+        # At the regular opening, the last premarket minute is not one of
+        # the required prior regular periods. Do not fence it as if it were.
+        session=self.session
+        if (self.reference_scope==REGULAR and session is not None and
+            bar.timestamp.astimezone(NY).date()==session.opens_at.astimezone(NY).date()):
+            return session.opens_at<=bar.timestamp<min(candle,session.closes_at)
+        return True  # Unknown scope/calendar cannot authorize old references.
 
     def status(self, state, now):
         self.connected_at = now if state == 'CONECTADO' else None
@@ -182,6 +216,9 @@ class TickGeometry:
             required = required_periods(sessions, candle, scope=self.reference_scope)
             if not required:
                 return None
+            self.reference_windows[candle]=tuple(required)
+            if len(self.reference_windows)>64:
+                self.reference_windows.pop(next(iter(self.reference_windows)))
             previous_start = required[-1][0]
             if candle > self.session.opens_at and previous_start != candle-timedelta(minutes=15):
                 return None
@@ -206,7 +243,7 @@ class TickGeometry:
                 closes.append(float(row[1]))
         return closes
 
-    def observe(self, message, received):
+    def observe(self, message, received, *, references_pending=False):
         symbol = str(message.get('S', '')).upper()
         now = self.now()
         if message.get('T') in ('c', 'x'):
@@ -264,10 +301,10 @@ class TickGeometry:
             if state['last'] is not None and stamp < state['last']:
                 return None, 'OUT_OF_ORDER'
             state['last'] = stamp
-            if state['history'] is None and now >= state['retry_at']:
+            if not references_pending and state['history'] is None and now >= state['retry_at']:
                 state['history'] = self._history(symbol, candle, now)
                 state['retry_at'] = now+timedelta(seconds=1)
-            if state['opening'] is None and now >= state['open_retry_at']:
+            if not references_pending and state['opening'] is None and now >= state['open_retry_at']:
                 # Mid-candle startup/reconnection: recover the real opening
                 # from the completed FIRST minute, never the first price seen.
                 first = self.store.load_frame(symbol=symbol, provider='ALPACA', feed=self.feed,
@@ -281,6 +318,8 @@ class TickGeometry:
             reason = 'READY_NO_EXIT'
             if state['quarantined']:
                 reason = 'CORRECTION_QUARANTINE'
+            elif references_pending:
+                reason = 'WAITING_FOR_REFERENCE_STORAGE'
             elif state['opening'] is None or state['history'] is None:
                 reason = 'WAITING_FOR_OPEN_OR_HISTORY'
             else:
@@ -425,12 +464,20 @@ class RealtimeBollingerWorker:
         self.geometry = TickGeometry(database, feed)
         self.feed, self.symbols = feed, tuple(symbols)
         self.queue, self.analysis = Queue(maxsize=4096), Queue(maxsize=2048)
+        self.persistence=Queue(maxsize=2048)
+        self.pending_bars={};self.bar_sequence=0
+        self.persistence_stage=('IDLE',time.monotonic())
         self.finished, self.failed = Event(), Event()
         self.publisher=TickPublisher(self.repository,feed,self.symbols,self.failed)
         self.state = 'DESCONECTADO'
         self.last_error = None
+        self.active_stage = ('IDLE', time.monotonic())
+        self.max_stage_seconds = {}
+        self.last_trade_queue_seconds = None
         self.threads = [Thread(target=self._run, name='bollinger-trades', daemon=True),
-                        Thread(target=self._analyze, name='bar-analysis', daemon=True)]
+                        Thread(target=self._analyze, name='bar-analysis', daemon=True),
+                        Thread(target=self._timings, name='ingest-timings', daemon=True),
+                        Thread(target=self._persist, name='official-bar-storage', daemon=True)]
         record_ingest_revision(database)
         for thread in self.threads:
             thread.start()
@@ -452,6 +499,48 @@ class RealtimeBollingerWorker:
 
     def bar(self, bar, callback):
         self.offer('bar', bar, callback)
+
+    def _references_pending(self,message):
+        pending=self.pending_bars.get(str(message.get('S','')).upper(),{})
+        if not pending:return False
+        try:
+            stamp=datetime.fromisoformat(message['t'].replace('Z','+00:00')).astimezone(UTC)
+            candle=stamp.replace(minute=stamp.minute//15*15,second=0,microsecond=0)
+            return any(self.geometry.bar_affects_reference(bar,candle) for bar in pending.values())
+        except (ValueError,KeyError,TypeError):return False
+
+    def _persist(self):
+        # One ordered writer, using the same canonical store. The fast thread
+        # keeps consuming trades while storage/SQLite is busy. Affected
+        # references stay unavailable until a commit acknowledgment is handled.
+        while not self.finished.is_set():
+            try:bars=self.persistence.get(timeout=.1)
+            except Empty:continue
+            try:
+                if self.failed.is_set():continue
+                self.persistence_stage=('BAR_PERSIST',time.monotonic())
+                self.geometry.store.upsert_bars([b for _,b,_,_ in bars],provider='ALPACA',feed=self.feed)
+                if not self.finished.is_set():self.offer('bars_committed',bars)
+            except Exception as error:
+                self.last_error='BAR_STORAGE_FAILED';self.failed.set()
+                record_ingest_failure(self.repository.database,self.last_error,error)
+            finally:
+                self.persistence_stage=('IDLE',time.monotonic())
+                self.persistence.task_done()
+
+    def _timings(self):
+        # Optional filesystem work has its own thread. It never holds a trade
+        # lock, touches SQLite, retries orders or creates a market connection.
+        path = Path(self.repository.database).resolve().parent/'trade_review/ingest_runtime/timing.json'
+        temporary = path.with_suffix('.'+str(os.getpid())+'.tmp')
+        while not self.finished.is_set():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_text(json.dumps(ingest_timing_snapshot(self)), encoding='utf-8')
+                temporary.replace(path)
+            except (OSError, RuntimeError):
+                pass
+            self.finished.wait(5)
 
     def _analyze(self):
         while not self.finished.is_set():
@@ -486,6 +575,8 @@ class RealtimeBollingerWorker:
             except Empty:
                 kind = None
             completed = 1 if kind is not None else 0
+            event_started = time.monotonic()
+            self.active_stage = (kind.upper() if kind else 'IDLE', event_started)
             try:
                 if self.failed.is_set():
                     self.state = 'ERROR'
@@ -513,10 +604,27 @@ class RealtimeBollingerWorker:
                             break
                         bars.append((item[1], item[2], item[3]))
                         completed += 1
-                    self.geometry.store.upsert_bars([b for b, _, _ in bars], provider='ALPACA', feed=self.feed)
-                    for bar, bar_received, bar_callback in bars:
+                    pending=[]
+                    for bar,bar_received,bar_callback in bars:
+                        self.bar_sequence+=1;token=self.bar_sequence
+                        self.pending_bars.setdefault(bar.symbol,{})[token]=bar
+                        pending.append((token,bar,bar_received,bar_callback))
                         state=self.geometry.states.get(bar.symbol)
-                        if state:
+                        if state and self.geometry.bar_affects_reference(bar,state['candle']):
+                            snapshots[bar.symbol]={'symbol':bar.symbol,'provider':'ALPACA','feed':self.feed,
+                                'source_kind':'TRADE','source_timestamp':bar_received.isoformat(),
+                                'received_at':bar_received.isoformat(),'signal':None,
+                                'reason':'WAITING_FOR_REFERENCE_STORAGE'}
+                            patterns.pop(bar.symbol,None);urgent=True
+                    self.persistence.put_nowait(pending)
+                elif kind == 'bars_committed':
+                    self.active_stage = ('BAR_REFERENCE_UPDATE', time.monotonic())
+                    for token,bar,bar_received,bar_callback in payload:
+                        pending=self.pending_bars.get(bar.symbol,{})
+                        pending.pop(token,None)
+                        if not pending:self.pending_bars.pop(bar.symbol,None)
+                        state=self.geometry.states.get(bar.symbol)
+                        if state and self.geometry.bar_affects_reference(bar,state['candle']):
                             if bar.timestamp < state['candle']:
                                 state['history']=None
                                 state['retry_at']=datetime.now(UTC)
@@ -531,7 +639,10 @@ class RealtimeBollingerWorker:
                         self.analysis.put_nowait((bar_callback, bar))
                 elif kind == 'trade':
                     processing_started = datetime.now(UTC)
-                    snapshot, reason = self.geometry.observe(payload, received)
+                    self.last_trade_queue_seconds = (processing_started-received).total_seconds()
+                    self.active_stage = ('TRADE_GEOMETRY', time.monotonic())
+                    snapshot, reason = self.geometry.observe(payload, received,
+                        references_pending=self._references_pending(payload))
                     symbol = str(payload.get('S', '')).upper()
                     if snapshot:
                         snapshots[symbol] = snapshot
@@ -566,6 +677,10 @@ class RealtimeBollingerWorker:
                     record_ingest_failure(self.repository.database, self.last_error, error)
                 self.failed.set()
             finally:
+                if kind:
+                    self.max_stage_seconds[kind] = max(self.max_stage_seconds.get(kind, 0.),
+                                                       time.monotonic()-event_started)
+                self.active_stage = ('IDLE', time.monotonic())
                 for _ in range(completed):
                     self.queue.task_done()
         self.publisher.submit({},audit,state='DETENIDO',now=datetime.now(UTC),final=True)

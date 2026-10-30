@@ -17,6 +17,8 @@ LABELS = {
     'SUBMITTED':'Entrada de esta fila ya utilizada', 'UNCERTAIN':'Requiere conciliación',
     'EXPIRED':'Sesión terminada', 'BLOCKED':'Entrada detenida',
     'WAITING_NEW_SIGNAL':'Esperando una señal nueva', 'BEFORE_SESSION':'Esperando apertura',
+    'AUTO_REARM_WAIT_NEW_SIGNAL':'Operación anterior finalizada; esperando una señal nueva',
+    'QUEUE_AUTHORIZATION_CHANGED':'Cambió tu selección durante la consulta; se comprobará de nuevo',
     'NO_CURRENT_SIGNAL':'Esperando que se cumpla la estrategia',
     'NO_ELIGIBLE_CONTRACTS':'Sin contrato ITM/OTM≤5 que cumpla rango y spread; sigue esperando',
     'NO_ELIGIBLE_EXPIRATION_OR_RANGE':'Sin vencimiento o rango apto',
@@ -29,6 +31,10 @@ LABELS = {
     'REAUTHORIZATION_REQUIRED':'Renovar autorización de Schwab',
     'AUTHORIZATION_REQUIRED':'Falta autorización de Schwab',
     'SIGNAL_CHANGED':'La señal cambió durante la consulta',
+    'SIGNAL_ENTRY_WINDOW_EXPIRED':'Pasaron 30 segundos sin comprar; espera otra señal nueva',
+    'SIGNAL_ENTRY_CLOCK_INVALID':'Reloj de señal inválido; entrada detenida',
+    'SIGNAL_WINDOW_UNAVAILABLE':'Falta evidencia completa del primer instante de la señal; requiere revisión del reloj o de los datos',
+    'DETECTOR_CLOCK_CHECK_FAILED':'Falló la prueba del reloj ET/UTC; requiere revisión técnica, salidas disponibles',
     'RESTART_WAIT_NEW_SIGNAL':'Tras reiniciar, esperando una señal nueva',
     'PAUSED_BY_USER':'Pausada por ti', 'SESSION_ENDED':'No se traslada automáticamente al día siguiente',
     'RECONCILIATION_REQUIRED':'Revisar solicitudes y posiciones; no se reintentará',
@@ -95,10 +101,10 @@ def show_queue_connection(result, slot):
 def render_automatic_entry_panel(*, embedded=False):
     st.markdown(MOBILE_STYLE,unsafe_allow_html=True)
     st.markdown('## Preparar entradas automáticas · Simulación')
-    st.info('Selecciona compañías, contratos y objetivo. Al ponerlas en cola, autorizas una compra '
-        'simulada por compañía en la sesión elegida cuando aparezca una señal nueva. No usa dinero de Schwab.')
+    st.info('Selecciona compañías, contratos y objetivo para operar con señales nuevas '
+        'en la sesión elegida. Las compras son simuladas; no usa dinero de Schwab.')
     st.caption('Salida superior → CALL · Salida inferior → PUT · ITM u OTM hasta 5.º strike · Apto más cercano al spot · '
-        f'Ask dentro de tu rango · Spread máximo ${MAX_ENTRY_SPREAD:.2f} · Stop loss {load_global_exit_policy().stop_loss_pct}% · Cierre manual disponible.')
+        f'Ask dentro de tu rango · Spread máximo ${MAX_ENTRY_SPREAD:.2f} · Entrada hasta 30 s desde la primera señal · Stop loss {load_global_exit_policy().stop_loss_pct}% · Cierre manual disponible.')
     connection_ready, connection_slot = render_queue_connection()
     if not embedded:
         if st.button('Operaciones y resultados',key='auto_queue_results',width='stretch'):
@@ -123,7 +129,12 @@ def render_automatic_entry_panel(*, embedded=False):
         '–'+datetime.fromisoformat(days[day][2]).astimezone(ZoneInfo('America/New_York')).strftime('%H:%M'), key='auto_queue_session',on_change=queue_session_changed)
     st.caption('Puedes preparar o pausar la cola antes de abrir o durante el mercado. '
         'Solo toma señales nuevas posteriores al armado; no compra por avisos antiguos. '
-        'Cada fila se consume al registrar una solicitud y caduca al cierre de su sesión.')
+        'La autorización caduca al cierre de su sesión.')
+    st.checkbox('Repetir con señales nuevas después de finalizar cada operación',value=True,
+        key='auto_queue_repeat',on_change=queue_repeat_changed)
+    st.caption('Si lo activas, se conserva cantidad y objetivo para nuevas entradas durante esta sesión, '
+        'sin máximo de compras por día. Solo una operación por compañía a la vez. '
+        'Pausar o eliminar detiene las próximas entradas; una orden incierta requiere conciliación.')
     mode=st.radio('Preparar cola', ['Varias compañías','Una compañía'],
         key='auto_queue_mode',horizontal=True,on_change=pause_queue_follow)
     if mode=='Varias compañías':
@@ -175,7 +186,8 @@ def render_automatic_entry_panel(*, embedded=False):
                 # Symbols/target/session are revalidated by backend.
                 state = read_manual_state(DEFAULT_MARKET_DATABASE, symbol, now.astimezone(ZoneInfo('America/New_York')).date())
                 store.arm(symbol, int(quantity), target, session_day, now=now,
-                    sessions=official_sessions(DEFAULT_MARKET_DATABASE, now), baseline=signal_key(state.get('tick') or {}))
+                    sessions=official_sessions(DEFAULT_MARKET_DATABASE, now), baseline=signal_key(state.get('tick') or {}),
+                    repeat=bool(st.session_state.get('auto_queue_repeat',True)))
                 st.session_state['auto_queue_follow']=True
                 st.success(symbol+' está en cola. Puedes añadir otra compañía en el mismo formulario.')
             except Exception:
@@ -192,6 +204,11 @@ def pause_queue_follow():
 def bulk_clear_consent():
     pause_queue_follow()
     st.session_state['auto_bulk_consent']=False
+
+
+def queue_repeat_changed():
+    st.session_state['auto_queue_consent']=False
+    bulk_clear_consent()
 
 
 def queue_session_changed():
@@ -345,7 +362,8 @@ def render_bulk_preparation(store,symbols,session_day,connection_ready,connectio
             now=datetime.now(timezone.utc)
             if not connection_is_recent(fresh,now):raise ValueError('CONNECTION_NOT_CURRENT')
             store.arm_many(selections,session_day,now=now,
-                sessions=official_sessions(DEFAULT_MARKET_DATABASE,now))
+                sessions=official_sessions(DEFAULT_MARKET_DATABASE,now),
+                repeat=bool(st.session_state.get('auto_queue_repeat',True)))
         except Exception:
             st.error('No se añadió ninguna compañía. Revisa si alguna ya está en cola, tiene un intento incierto o necesita un rango o sesión válidos.')
         else:
@@ -396,6 +414,8 @@ def _render_queue_status(store):
         st.error('No se pudo consultar el estado de la cola.'); return
     if status == 'READY':
         st.success('Motor de entradas conectado · Simulación local')
+    elif status == 'DETECTOR_CLOCK_CHECK_FAILED':
+        st.error('Fallo en la comprobación del reloj de señales. Las nuevas compras están detenidas; las salidas siguen disponibles. Requiere revisión técnica.')
     elif status == 'MONITOR_NOT_READY':
         st.warning('Esperando sesión regular y monitor de salidas listo. Fuera de mercado no se ejecutan entradas.')
     else:
@@ -424,6 +444,7 @@ def _render_queue_status(store):
     armed = [p for p in plans if p['state']=='ARMED' and datetime.fromisoformat(p['closes_at'])>now]
     st.write(f"En cola: {len(armed)} compañías · Máximo conjunto de primas: $"+
         f"{sum((Decimal(p['max_cost']) for p in armed),Decimal('0')):.2f} USD")
+    repeating={p['plan_id'] for p in store.read('SELECT plan_id FROM queue_repeat_permissions WHERE enabled=1')}
     for row in plans:
         with st.container(border=True):
             st.markdown('**'+row['symbol']+' · '+str(row['quantity'])+' contratos · '+
@@ -440,6 +461,9 @@ def _render_queue_status(store):
             except (ValueError,OSError):pass
             if row['state']=='ARMED' and st.button('Pausar '+row['symbol'], key='auto_queue_pause_'+row['id'],width='stretch'):
                 store.pause(row['id']); st.rerun()
+            if row['state']=='SUBMITTED' and row['id'] in repeating:
+                if st.button('Detener próximas entradas de '+row['symbol'],key='auto_queue_stop_repeat_'+row['id'],width='stretch'):
+                    store.pause(row['id']);st.rerun()
             removable=store.can_archive(row)
             if (row['state']=='UNCERTAIN' and row['client_key'] is None and
                     now>=datetime.fromisoformat(row['closes_at'])):
@@ -456,7 +480,8 @@ def _render_queue_status(store):
                     st.warning('No se pudo quitar: la operación cambió o requiere conciliación. Revisa su estado.');continue
                 st.rerun()
             if row['client_key']:
-                st.caption('Esta fila autoriza una compra. Para otra entrada, añade una nueva fila con tu cantidad y objetivo.')
+                st.caption('Repetición autorizada: al finalizar esperará una señal nueva.' if row['id'] in repeating
+                    else 'Esta fila autoriza una compra. Para otra entrada, añade una nueva fila con tu cantidad y objetivo.')
                 render_card_position(row,cards.get(row['client_key']))
                 if st.button('Ver operación / cerrar', key='auto_queue_view_'+row['id']):
                     st.query_params.clear(); st.query_params['operaciones']='1'; st.rerun()

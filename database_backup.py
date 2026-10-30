@@ -9,7 +9,25 @@ import json
 from pathlib import Path
 import sqlite3
 import shutil
+import time
 from typing import Any, Sequence
+
+
+def backup_read_snapshot(source_connection, destination_connection, *, pages=256, progress=None):
+    """Pin the source read snapshot so other WAL writers cannot restart copying.
+
+    Only for a fresh source connection with no existing transaction. This is
+    a read transaction, not a writer lock; normal WAL writers keep operating.
+    The destination remains the SQLite backup API's consistent output.
+    """
+    if source_connection.in_transaction:
+        raise ValueError('El origen del backup ya tiene una transacción abierta.')
+    source_connection.execute('BEGIN')
+    try:
+        source_connection.execute('SELECT name FROM sqlite_schema LIMIT 1').fetchone()
+        source_connection.backup(destination_connection, pages=pages, progress=progress)
+    finally:
+        source_connection.rollback()
 
 
 def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, retention: int = 30) -> dict[str, Any]:
@@ -26,16 +44,18 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = backup_root / f"{source_path.stem}_{timestamp}.db"
     partial = destination.with_suffix(".db.partial")
-    source_connection = sqlite3.connect(source_path)
+    source_connection = sqlite3.connect(source_path.as_uri()+'?mode=ro', uri=True)
     destination_connection = sqlite3.connect(partial)
+    copy_started = time.monotonic()
     try:
         # The online API produces a consistent snapshot. Check that complete
         # snapshot below; do not hold a full integrity scan on the live source.
-        source_connection.backup(destination_connection)
+        backup_read_snapshot(source_connection, destination_connection)
         destination_connection.commit()
     finally:
         destination_connection.close()
         source_connection.close()
+    copy_seconds = time.monotonic()-copy_started
     check_connection = sqlite3.connect(partial)
     try:
         # A source in WAL mode can leave that mode in the copied header. Make
@@ -59,6 +79,8 @@ def create_sqlite_backup(source: str | Path, backup_directory: str | Path, *, re
         "sha256": digest,
         "integrity": "ok",
         "journal_mode": "delete",
+        "source_snapshot": "pinned_read_transaction_v1",
+        "copy_seconds": copy_seconds,
     }
     manifest_path = destination.with_suffix(".json")
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

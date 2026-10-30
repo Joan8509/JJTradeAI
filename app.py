@@ -5027,8 +5027,6 @@ def _render_dashboard_visuals() -> None:
 
 
 def main() -> None:
-    from sqlite_runtime_guard import require_safe_wal_runtime
-    require_safe_wal_runtime(DEFAULT_MARKET_DATABASE)
     # Construye la navegación principal de la aplicación.
     from mobile_layout import MOBILE_STYLE
     st.markdown(MOBILE_STYLE, unsafe_allow_html=True)
@@ -5049,6 +5047,11 @@ def main() -> None:
     }
     [data-testid="stVerticalBlockBorderWrapper"] {border-color: #29405c !important;}
     </style>""", unsafe_allow_html=True)
+    from operating_mode_page import render_operating_mode
+    if not render_operating_mode(_render_dashboard_visuals):
+        return
+    from sqlite_runtime_guard import require_safe_wal_runtime
+    require_safe_wal_runtime(DEFAULT_MARKET_DATABASE)
     if st.query_params.get('operaciones')=='1':
         from manual_execution_panel import render_manual_positions
         if st.button('Volver a Mis operaciones'):
@@ -5060,6 +5063,7 @@ def main() -> None:
         from manual_trade_panel import render_manual_trade
         if st.button('Volver al dashboard'):
             st.query_params.clear()
+            st.query_params['modo']='simulacion'
             st.rerun()
         render_manual_trade(st.query_params['operar'].strip().upper(),
             st.query_params.get('lado','CALL'),st.query_params.get('senal'))
