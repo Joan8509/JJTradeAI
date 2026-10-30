@@ -1,5 +1,10 @@
 # Checkpoint de desarrollo — 30 de octubre de 2026
 
+Código publicado en main:636295e6e763df43ad1172c9de0ff4fbd5f420db,
+59archivos. Consulta directa de refs/heads/main confirmó el mismo SHA el30/10
+a las13:27ET. Este recibo se guarda en commit documental posterior. No hubo
+reinicios de servicios, compras ni avisos para realizar el guardado.
+
 Guardado solicitado por el usuario. Reúne las mejoras posteriores al checkpoint
 del27/10, preservando estrategia v5, expansión3%, controles de datos/contratos,
 notificaciones y órdenes reales deshabilitadas.

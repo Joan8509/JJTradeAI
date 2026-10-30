@@ -6,10 +6,13 @@ exports/trade_review/2026-10-30_no_entries/github_checkpoint/ y en los diarios
 docs/SESSION_STATE_*.md. No se elimina al publicar este resumen sin datos privados.
 Consultar docs/GITHUB_CHECKPOINT_2026-10-30.md y STRATEGY_OPERATING_CONTRACT.md.
 
-Guardado GitHub en preparación por petición expresa del usuario30/10:
+Guardado GitHub publicado y comprobado30/10/2026 a las13:27ET:
+commit636295e6e763df43ad1172c9de0ff4fbd5f420db, main remoto coincide.
 146testsOK75,292s y diff --check sin errores. Paquete revisado sin hallazgos
-de secretos/identificadores privados en59archivos seleccionados. Publicación
-y SHAremoto requieren verificación; no inferirlos del commit local.
+de secretos/identificadores privados en59archivos seleccionados. Documentos
+históricos privados y continuidad completa conservados locales, sin borrarlos.
+Este recibo documental se publicará después del commit de código y se verificará
+también contra el remoto; no se reinician servicios ni se envían avisos/órdenes.
 
 ## Estrategia y autorizaciones vigentes
 
