@@ -20,3 +20,12 @@ respalda desarrollo; no reemplaza un backup completo restaurable de la VPS.
 La confirmación de publicación requiere comparar HEAD con refs/heads/main remoto.
 El recibo posterior registra el SHA verificado. No se envían operaciones o avisos,
 ni se altera la cola durante este guardado.
+
+## Publicación verificada
+
+Código publicado en main: `8685959dcbe444cb3a5e841e4ef4b0762809fda1`.
+Consulta directa a `refs/heads/main` confirmó el mismo SHA después del push.
+95 archivos incluidos; 379 pruebas aprobadas y revisión final de formato sin
+errores. El recibo se conserva en un commit documental posterior. Los documentos
+históricos locales no seleccionados, diarios y datos privados permanecen en la
+VPS; no se borraron ni se publicaron. No hubo reinicios, órdenes ni avisos.

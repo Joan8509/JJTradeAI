@@ -53,3 +53,8 @@ operaciones individuales y diarios privados quedan excluidos del repositorio.
 Siguiente paso operativo: comprobar procesos, heartbeat, conexión y estado de cola
 antes de declarar disponibilidad; no rearmar por abrir la app o clonar Git.
 Reglas: STRATEGY_OPERATING_CONTRACT.md. Uso: GUIA_OPERACION_REAL.md.
+
+Guardado completado: código publicado en main, commit
+8685959dcbe444cb3a5e841e4ef4b0762809fda1, confirmado mediante consulta directa
+al SHA remoto después del push. Recibo en GITHUB_CHECKPOINT_2026-11-04.md.
+Los datos privados y documentos históricos no seleccionados siguen locales.
