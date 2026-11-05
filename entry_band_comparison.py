@@ -1,14 +1,16 @@
-"""Descriptive 3%/5% comparison. Never authorizes, delays or rejects an order."""
+"""Current 3% comparison and historical 5% audit; never an entry gate."""
 from datetime import datetime
 from decimal import Decimal
 from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT,measure_band_expansion
 
 REVISION='entry_band_3_vs_5_observation_v1'
+ACTIVE_FIVE_REVISION='entry_band_5_active_audit_v1'
 CANDIDATE_MINIMUM_PCT=5.0
 
 
 def compare_snapshot(snapshot):
-    result=dict(revision=REVISION,mode='OBSERVATION_ONLY',
+    result=dict(revision=ACTIVE_FIVE_REVISION if MINIMUM_BAND_EXPANSION_PCT==5 else REVISION,
+        mode='ACTIVE_THRESHOLD_AUDIT' if MINIMUM_BAND_EXPANSION_PCT==5 else 'OBSERVATION_ONLY',
         active_minimum_pct=MINIMUM_BAND_EXPANSION_PCT,
         candidate_minimum_pct=CANDIDATE_MINIMUM_PCT,status='UNKNOWN',meets_candidate=None)
     try:
@@ -37,16 +39,21 @@ def summarize_entries(entries):
     """Group actual filled trades. This is never hypothetical 5% strategy PnL."""
     groups={name:dict(entries=0,open=0,closed=0,wins=0,losses=0,flat=0,gross=Decimal(0))
             for name in ('PASS_5','BELOW_5','UNKNOWN')}
+    active_five={name:dict(entries=0,open=0,closed=0,wins=0,losses=0,flat=0,gross=Decimal(0))
+            for name in ('PASS_5','BELOW_5','UNKNOWN')}
     for entry in entries:
         study=entry.get('entry_band_comparison') or {}
         status=study.get('status','UNKNOWN') if isinstance(study,dict) else 'UNKNOWN'
-        if (not isinstance(study,dict) or study.get('revision')!=REVISION
+        current=(isinstance(study,dict) and study.get('revision')==ACTIVE_FIVE_REVISION
+            and study.get('active_minimum_pct')==5 and study.get('candidate_minimum_pct')==5
+            and study.get('mode')=='ACTIVE_THRESHOLD_AUDIT' and status in active_five)
+        if (not current and (not isinstance(study,dict) or study.get('revision')!=REVISION
             or study.get('active_minimum_pct')!=3 or study.get('candidate_minimum_pct')!=5
-            or study.get('mode')!='OBSERVATION_ONLY' or status not in groups):status='UNKNOWN'
-        group=groups[status];group['entries']+=1
+            or study.get('mode')!='OBSERVATION_ONLY' or status not in groups)):status='UNKNOWN'
+        group=(active_five if current else groups)[status];group['entries']+=1
         if entry['status']!='CLOSED':group['open']+=1;continue
         pnl=Decimal(str(entry['report']['gross_pnl']))
         group['closed']+=1;group['gross']+=pnl
         group['wins' if pnl>0 else 'losses' if pnl<0 else 'flat']+=1
-    return dict(revision=REVISION,mode='OBSERVATION_ONLY',groups=groups,
+    return dict(revision=REVISION,mode='OBSERVATION_ONLY',groups=groups,active_five_groups=active_five,
                 actual_local_simulation_results_only=True,hypothetical_five_percent_pnl=False)

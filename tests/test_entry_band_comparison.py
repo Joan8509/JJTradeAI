@@ -2,7 +2,7 @@
 from copy import deepcopy
 from unittest import TestCase
 from unittest.mock import patch
-from entry_band_comparison import compare_snapshot,attach_comparison,REVISION,summarize_entries
+from entry_band_comparison import compare_snapshot,attach_comparison,REVISION,ACTIVE_FIVE_REVISION,summarize_entries
 from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT
 from tests import test_automatic_entry_queue as fixtures
 
@@ -12,7 +12,7 @@ class BandComparisonTests(TestCase):
         return dict(source_timestamp='2026-10-28T14:00:00+00:00',
             geometry=dict(upper=110.5,lower=100-weak/10,previous_upper=110,previous_lower=100))
 
-    def test_each_band_inclusive_five_and_active_three_stays_unchanged(self):
+    def test_each_band_inclusive_five_and_active_five_audit(self):
         self.assertEqual(MINIMUM_BAND_EXPANSION_PCT,3)
         for value,expected in [(3,False),(4.9,False),(5,True),(6,True)]:
             snapshot=self.snapshot(value);before=deepcopy(snapshot)

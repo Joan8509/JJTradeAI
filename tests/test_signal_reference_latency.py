@@ -142,7 +142,8 @@ class SignalReferenceLatencyTests(unittest.TestCase):
         record_ingest_revision(self.database)
         receipt=json.loads((self.database.parent/'trade_review/ingest_runtime/loaded.json').read_text())
         self.assertEqual(set(receipt),{'utc','pid','revision','source_sha256','sqlite_version',
-            'strategy_version','expansion_source_sha256','minimum_band_expansion_pct','detector_source_sha256'})
+            'strategy_version','expansion_source_sha256','minimum_band_expansion_pct','detector_source_sha256',
+            'timing_revision','bar_storage_revision','reference_scope_fence_revision'})
         self.assertEqual(receipt['strategy_version'],bollinger_tick_stream.STRATEGY_VERSION)
         self.assertEqual(receipt['minimum_band_expansion_pct'],3)
         self.assertEqual(receipt['sqlite_version'],sqlite3.sqlite_version)

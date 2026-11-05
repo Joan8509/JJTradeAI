@@ -1,0 +1,28 @@
+[
+  {
+    "threshold": 3,
+    "upper_pct": 14.769382544986769,
+    "lower_pct": 3.000000100000051,
+    "previous_upper": 100.0,
+    "previous_lower": 90.0,
+    "upper": 101.47693825449868,
+    "lower": 89.69999999,
+    "opening": 91.63750744018022,
+    "price": 103.2338485390542,
+    "synthetic": true,
+    "path": "bollinger_tc2000_3.png"
+  },
+  {
+    "threshold": 5,
+    "upper_pct": 17.683413442168217,
+    "lower_pct": 5.000000100000079,
+    "previous_upper": 100.0,
+    "previous_lower": 90.0,
+    "upper": 101.76834134421682,
+    "lower": 89.49999998999999,
+    "opening": 91.63750744018022,
+    "price": 104.14787943623536,
+    "synthetic": true,
+    "path": "bollinger_tc2000_5.png"
+  }
+]

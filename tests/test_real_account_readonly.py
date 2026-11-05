@@ -99,6 +99,25 @@ class RealAccountReadOnlyTests(TestCase):
         self.assertFalse(data['option_buying_power_verified']);self.assertFalse(data['currency_verified'])
         self.assertTrue(any(b['concept']=='Efectivo informado' for b in data['balances']))
 
+    def test_closing_only_unknown_is_not_false_or_options_approval(self):
+        payload=self.client.positions.return_value
+        for value in (None,'false',0,1,True,False):
+            with self.subTest(value=value):
+                payload['securitiesAccount']['isClosingOnlyRestricted']=value
+                data=normalize_account(payload,NUMBER)
+                self.assertIs(data['closing_only_restricted'],value if type(value) is bool else None)
+                self.assertFalse(data['options_permissions_verified'])
+                self.assertFalse(data['option_buying_power_verified'])
+
+    def test_unsettled_cash_is_reported_separately_without_inventing_spendable(self):
+        payload=self.client.positions.return_value
+        payload['securitiesAccount']['currentBalances']={'cashBalance':100,'cashAvailableForTrading':100,'unsettledCash':60}
+        data=normalize_account(payload,NUMBER)
+        amounts={r['concept']:r['value'] for r in data['balances']}
+        self.assertEqual(amounts['Efectivo pendiente de liquidación informado'],'60')
+        self.assertEqual(amounts['Efectivo para operar informado'],'100')
+        self.assertFalse(data['option_buying_power_verified'])
+
     def test_account_store_and_lock_are_distinct_from_data_store(self):
         old=EncryptedSchwabStore();new=AccountReadOnlyStore()
         self.assertEqual(old.path.parent,new.path.parent)

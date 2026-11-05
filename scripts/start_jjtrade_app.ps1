@@ -9,6 +9,16 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "No existe el Python del entorno virtual: $python"
 }
 
+# The REAL host has its own singleton, encrypted state and explicit daily queue.
+# Running it does not arm entries. It inherits this existing Password-logon task
+# identity so closing the browser/RDP does not own its lifetime.
+try {
+    Start-Process -FilePath $python -ArgumentList @('-m', 'real_execution_host') `
+        -WorkingDirectory $projectRoot -WindowStyle Hidden
+} catch {
+    Write-Warning 'No se pudo iniciar el ejecutor real; la interfaz seguirá disponible.'
+}
+
 $client = New-Object System.Net.Sockets.TcpClient
 try {
     $connection = $client.ConnectAsync("127.0.0.1", 8501)

@@ -1,5 +1,10 @@
 # Comparación observacional de expansión3% y5%
 
+Actualización30/10: el usuario autorizó5% activo; cargado15:59:55ET. Este
+documento conserva el diseño HISTÓRICO de comparación3/5, sin reescribir sus
+datos. Entradas nuevas usan auditoría5% y grupos separados. Ver
+[cambio vigente](BAND_FIVE_PERCENT_2026-10-30.md) y CURRENT_CONTEXT.
+
 El usuario eligió28/10/2026 comparar5% manteniendo activo3%. Esta decisión
 sustituye la consulta pendiente; no autoriza activar5% como filtro de entrada.
 

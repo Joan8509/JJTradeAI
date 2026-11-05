@@ -133,13 +133,14 @@ class BollingerPhoneTests(unittest.TestCase):
             frame.loc[1,'open']=104 if side=='SUPERIOR' else 96
             self.assertIsNone(detect_exit(frame))
 
-    def test_meta_marked_candle_inside_opening_and_both_bands_open(self):
+    def test_archived_meta_opening_inside_accepts_three_percent_minimum(self):
         # Archived first minute of the marked 09:45-10:00 candle. Previous
         # close is 0.1187 above its band; this candle's own opening is inside.
         args=(751.63,751.5113244385666,739.7901755614334,745.65075,
               753.765,752.9076822226375,739.2223177773624,746.065)
         opening=dict(opening=751.31,opening_upper=752.2988241362781,
                      opening_lower=739.5856758637218)
+        # Original reference is unchanged: its lower-band opening is above3%, below5%.
         self.assertEqual(detect_values(*args,**opening),'SUPERIOR')
         narrowed=list(args);narrowed[6]=args[2]
         self.assertIsNone(detect_values(*narrowed,**opening))

@@ -2,11 +2,21 @@
 from datetime import datetime,timedelta,timezone
 from decimal import Decimal,InvalidOperation
 from pathlib import Path
-import re,secrets
-from schwab_connection import EncryptedSchwabStore,OAuthConfig,SchwabOAuth,SchwabReadOnlyClient,SchwabError,aware
+from dataclasses import dataclass,field
+import re,secrets,hashlib
+from schwab_connection import OAuthConfig,SchwabOAuth,SchwabReadOnlyClient,SchwabError,aware
+from real_live_storage import RealEncryptedStore as EncryptedSchwabStore
 
 ACCOUNT_CALLBACK='https://127.0.0.1:8186/schwab/callback'
 PRODUCT='ACCOUNTS_READ_ONLY'
+
+
+@dataclass(frozen=True)
+class AccountPreviewContext:
+    binding: str=field(repr=False)
+    account_number: str=field(repr=False)
+    account_hash: str=field(repr=False)
+    oauth: object=field(repr=False)
 
 
 class AccountReadOnlyStore(EncryptedSchwabStore):
@@ -67,7 +77,8 @@ def normalize_account(payload,expected_number):
     if str(account.get('accountNumber',''))!=expected_number:raise SchwabError('ACCOUNT_IDENTITY_MISMATCH')
     balances=account.get('currentBalances')
     fields=(('liquidationValue','Valor de liquidación informado'),('cashBalance','Efectivo informado'),
-        ('availableFunds','Fondos disponibles informados'),('cashAvailableForTrading','Efectivo para operar informado'))
+        ('availableFunds','Fondos disponibles informados'),('cashAvailableForTrading','Efectivo para operar informado'),
+        ('unsettledCash','Efectivo pendiente de liquidación informado'))
     amounts=[dict(concept=label,value=number(balances[key])) for key,label in fields
              if isinstance(balances,dict) and key in balances and number(balances[key]) is not None]
     raw=account.get('positions');known=isinstance(raw,list)
@@ -82,7 +93,9 @@ def normalize_account(payload,expected_number):
     return dict(account_type=account.get('type') if account.get('type') in ('CASH','MARGIN') else 'NO_VERIFICADO',
         balances=amounts,positions=positions,positions_known=known,position_count=len(raw) if known else None,
         positions_truncated=known and len(raw)>200,options_permissions_verified=False,
-        option_buying_power_verified=False,currency_verified=False)
+        option_buying_power_verified=False,currency_verified=False,
+        closing_only_restricted=account.get('isClosingOnlyRestricted')
+            if type(account.get('isClosingOnlyRestricted')) is bool else None)
 
 
 def normalize_orders(raw):
@@ -111,6 +124,24 @@ class AccountReadOnlySession:
         self.inventory=None;self.snapshot=None;self._next={}
 
     def __repr__(self):return '<AccountReadOnlySession: read-only, private server state>'
+
+    def preparation_binding(self,reference,*,require_recent=False):
+        """Bind a local draft to an explicit observed account; never authorize trading."""
+        if reference not in self._accounts or not self.snapshot or self.snapshot.get('reference')!=reference:
+            raise SchwabError('ACCOUNT_SELECTION_REQUIRED')
+        if self.snapshot.get('state')!='ACCOUNT_READABLE' or self.snapshot.get('real_orders_enabled') is not False:
+            raise SchwabError('ACCOUNT_READ_UNAVAILABLE')
+        checked=aware(datetime.fromisoformat(self.snapshot['checked_at']));now=aware(self.clock())
+        if now<checked or require_recent and now-checked>timedelta(seconds=60):
+            raise SchwabError('ACCOUNT_READING_NOT_CURRENT')
+        identity,key=self._accounts[reference]
+        return hashlib.sha256(('JJTRADE_ACCOUNT_PREPARATION_V1\0'+identity+'\0'+key).encode()).hexdigest()
+
+    def preview_context(self,reference):
+        """Server-only context for an explicit recent selection; no GET or trading grant."""
+        binding=self.preparation_binding(reference,require_recent=True)
+        identity,key=self._accounts[reference]
+        return AccountPreviewContext(binding,identity,key,self._client_for_read().oauth)
 
     def _client_for_read(self):
         if self._client is None:self._client=self.factory()

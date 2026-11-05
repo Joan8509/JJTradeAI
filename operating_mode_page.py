@@ -38,8 +38,8 @@ def render_operating_mode(render_brand):
     render_brand()
     if page == 'real':
         st.subheader('Operar en Real')
-        from real_account_panel import render_real_account_panel
-        render_real_account_panel()
+        from real_preparation_panel import render_real_workspace
+        render_real_workspace()
         st.button('Ir a Simulación', key='jj_real_to_simulation', type='primary',
                   on_click=_choose, args=('simulacion',), width='stretch')
         st.button('← Volver al inicio', key='jj_real_back',
@@ -53,7 +53,7 @@ def render_operating_mode(render_brand):
         with st.container(border=True):
             st.markdown('### Operar en Real')
             st.write('Tu espacio para operar con tu cuenta Schwab.')
-            st.caption('Consulta de cuenta · Solo lectura')
+            st.caption('Cuenta Schwab · Cola automática real')
             st.button('Operar en Real', key='jj_select_real',
                       on_click=_choose, args=('real',), width='stretch')
     with right:

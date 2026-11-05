@@ -1,5 +1,27 @@
 # Reglas estables de JJTrade AI
 
+Actualización04/11/2026, controles de la cola REAL: el usuario autoriza que
+«Activar preparación» guarde y arme las compañías seleccionadas en una sola
+acción explícita. Cola real conserva quitar una pendiente, Pausar/Activar la
+misma cola y eliminar todas las pendientes sin claim/solicitud iniciada. Reanudar
+no renueva señales ni reinicia primera entrada/claims; no revive excluidas,
+retiradas, completadas o revisiones, ni pasa una cola vencida a otro día. Limpiar
+espera no cancela órdenes ni vende posiciones; monitores de salida continúan.
+Visitar páginas/consultar cuenta no arma. Refresco local de interfaz no consulta
+broker ni activa operaciones. Ver [controles](REAL_QUEUE_CONTROLS_2026-11-04.md).
+
+Actualización03/11/2026, cierre manual externo: el usuario autoriza detectar y
+conciliar ventas desde thinkorswim/Schwab del contrato exacto comprado por la
+app en la cuenta seleccionada. Pausar nuevas compras, conservar exclusiones y
+primera entrada, retirar solo órdenes propias y confirmar estados terminales
+antes de atribuir ejecuciones. SINGLE MARKET/LIMIT con fills completos; una
+venta parcial conserva gestión del remanente y la cola pausada. Evidencia
+incierta/compleja exige revisión; nunca adoptar compras externas, inferir un
+cierre de posiciones omitidas, duplicar ventas ni rearmar por haber cerrado.
+Sustituye confirmación individual previa cuando la evidencia es verificable.
+Estado de carga en CURRENT_CONTEXT; detalle en
+[cierres manuales externos](REAL_EXTERNAL_MANUAL_CLOSES_2026-11-03.md).
+
 Confirmadas por el usuario en el mensaje de continuidad de la PC del
 15/10/2026. Este contrato fija el comportamiento; el estado operativo y la
 evidencia vigente se consultan en [CURRENT_CONTEXT.md](CURRENT_CONTEXT.md).
@@ -7,6 +29,12 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
 
 ## Estrategia
 
+- Actualización autorizada 02/11/2026 tras revisar QQQ: mínimo vigente
+  **3% por cada banda**, inclusive, respecto del ancho anterior. Sustituye
+  el mínimo de 5% autorizado el 30/10, que se conserva abajo como historia.
+  No cambia Bollinger 20/2, apertura dentro, dirección ni ventana de entrada.
+  Cambiar este umbral no rearma la cola REAL. El armado o la pausa vigentes
+  y la carga efectiva se comprueban en CURRENT_CONTEXT y en el estado actual.
 - Versión `v5_apertura_dentro_bandas_actuales`, velas de 15 minutos,
   Bollinger 20 períodos, desviación 2, `ddof=0`.
 - Aclaración expresa del usuario26/10/2026, tras captura y pregunta concreta:
@@ -17,14 +45,19 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
   desconocida o todavía fuera de las bandas actuales no autoriza señal.
 - Ambas bandas se expanden frente a la vela anterior: superior sube e inferior
   baja. Mayor anchura o movimiento de una sola banda no bastan.
-- Decisión28/10: comparar5% de forma observacional manteniendo ACTIVO3%.
-  La comparación no veta ni demora entradas y no cambia órdenes o avisos.
-  [Alcance y límites](ENTRY_BAND_COMPARISON_2026-10-28.md).
-- Actualización autorizada26/10/2026: mínimo **3% por cada banda** respecto
+- Actualización autorizada30/10/2026 tras revisar entrada marginal: mínimo
+  **5% por cada banda**, inclusive, respecto del ancho anterior. Sustituye
+  el3% autorizado26/10 y la decisión28/10 de mantener5% solo observacional.
+  Es la nueva regla autorizada para señales/entradas nuevas; su activación
+  efectiva depende de cargarla sin interrumpir posiciones existentes. Consultar
+  CURRENT_CONTEXT y no deducir carga del valor en disco. No altera stops,
+  objetivos, cierres ni operaciones ya registradas. No espera cierre de vela.
+  La comparación histórica3%vs5% se conserva separada de la auditoría5% activa.
+- Referencia histórica26/10/2026: mínimo **3% por cada banda** respecto
   del ancho anterior, inclusive. Tanto el avance de la superior como el
   descenso de la inferior, divididos por el ancho anterior y multiplicados
-  por100, deben ser >=3. Sustituye el mínimo1% autorizado22/10;
-  no es3% del precio ni del crecimiento total del ancho. Sigue intravela,
+  por100, debían ser >=3; el nuevo mínimo autorizado30/10 es >=5.
+  No es5% del precio ni del crecimiento total del ancho. Sigue intravela,
   sin esperar cierre. [Detalle](BAND_EXPANSION_FILTER_2026-10-22.md).
 - Salida superior: precio sobre banda superior y apertura, punto medio subiendo.
   Salida inferior: precio bajo banda inferior y apertura, punto medio bajando.
@@ -38,6 +71,15 @@ Una prueba unitaria no demuestra funcionamiento en mercado ni entrega real.
   oficial para períodos cerrados, sesión previa y cierre anterior requerido.
 
 ## Recepción y avisos
+
+Actualización03/11/2026 para REAL: confirmaciones de compra y venta por Telegram
+basadas en ejecuciones auténticas de Schwab, separadas del aviso de estrategia.
+Diario DPAPI y emisor independiente: no retrasa la entrada ni el monitor de
+salida, no reenvía entregas aceptadas o inciertas. Rechazo explícito429 espera
+Retry-After. No reemitir operaciones históricas al instalar ni resetear el corte
+al reiniciar. El objetivo elegido se activa con el Bid del contrato respecto
+del costo medio ejecutado; stop20% conservado. Ver
+[implementación y límites](REAL_TRADE_NOTICES_AND_FAST_EXITS_2026-11-03.md).
 
 Actualización29/10/2026 autorizada para ejecución simulada:30s desde el primer
 EXIT auditado por el detector, no desde que la cola esté preparada; sin evidencia
@@ -80,6 +122,15 @@ anteriores. [Estado y pruebas](EXTENDED_REFERENCE_ALIGNMENT_2026-10-20.md).
   conserva resultado. No cambia deteccion/dedup ni habilita ordenes reales.
 
 ## Operación y conservación
+
+Actualización03/11/2026: el usuario autoriza colocar el objetivo de ganancia
+REAL como SELL_TO_CLOSE LIMIT DAY en Schwab tras confirmar la compra y su
+costo/cantidad finales. Requiere preview auténtico del precio exacto, reserva
+de cantidad, conciliación persistente y aviso de WORKING distinto de fill.
+Stop20% sigue en la VPS: cancelar y confirmar la ganancia antes de reemplazar,
+sin duplicar ventas ni repetir envíos inciertos. Compras pausadas no se rearman.
+No cambia la simulación ni añade STOP nativo/OCO. Ver
+[objetivo colocado en broker](REAL_BROKER_PROFIT_LIMIT_2026-11-03.md).
 
 Actualización22/10/2026 posterior al spread0.08: usuario autoriza contratos ITM
 y también los primeros **cinco strikes OTM distintos**, incluyendo el quinto,
@@ -193,10 +244,18 @@ comprar manualmente desde ese aviso. [Detalle](MANUAL_ALERT_ENTRY_2026-10-19.md)
 - Probar desconexión RDP y reinicio de Windows de forma coordinada, con respaldo
   y recuperación preparados. Sesión 0/Password demuestra identidad de servicio,
   pero no sustituye una prueba real de desconexión o reinicio.
-- Desarrollo de conexión y simulación Schwab autorizado el16/10/2026; órdenes
-  reales continúan sin autorización de activación. Gate `orders_enabled=false`;
-  no avisos históricos ni órdenes reales en ensayos. Consola de recuperación y
-  prueba de reinicio quedan pendientes operativos y no bloquean el desarrollo.
+- Desarrollo de conexión y simulación Schwab autorizado el16/10/2026.
+  Actualización30/10/2026: el usuario autoriza avanzar en la activación real,
+  con cantidades y objetivos elegidos y parámetros iguales a simulación.
+  Sustituye la restricción anterior de autorización solo preparatoria.
+  Actualizacion01/11: integracion del ejecutor real y armado por cuenta/sesion,
+  con cantidades/objetivos elegidos y opcion explicita de repeticion. El estado
+  efectivo de habilitacion se consulta en CURRENT_CONTEXT; no pedir de nuevo
+  permiso generico ni confundir seleccion de vista con armar ordenes.
+  Antes de habilitarlo verificar cuenta, fondos/costos, contratos, despacho,
+  conciliación y salidas. Estado efectivo en CURRENT_CONTEXT, sin órdenes reales
+  en ensayos sintéticos ni avisos históricos. Consola de recuperación y prueba
+  de reinicio quedan pendientes operativos y no bloquean el desarrollo.
 
 ## Evidencia de código y regresiones
 
@@ -216,3 +275,11 @@ Documentos de detalle: [intraminuto](BOLLINGER_INTRAMINUTE.md),
 y [configuración privada](VPS_PRIVATE_TASKS.md). Sus estados históricos y cifras
 de pruebas no sustituyen comprobaciones actuales; los textos que mencionan v3
 en SMA/niveles no autorizan volver de v4 a una regla anterior.
+
+
+Actualizacion01/11/2026 posterior a integracion REAL: radar de varias companias,
+una sola entrada total por cola armada. La solicitud inicial reserva el cupo
+antesHTTP; primer fill incluso parcial excluye las demas y no repite al cerrar.
+Solo rechazo/cancelacion terminal sin fills o prueba de ningun envio permite
+seguir buscando; incertidumbre conserva reserva. Nueva cola solo por accion
+explicita, no rollover automatico. Simulacion conserva sus reglas anteriores.

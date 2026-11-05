@@ -40,12 +40,12 @@ class OperatingModePageTests(unittest.TestCase):
         self.assertEqual(page.session_state['guard_calls'], 0)
         self.assertIn('jj_select_simulation', [b.key for b in page.button])
 
-    def test_real_is_informational_and_cannot_reach_dashboard(self):
+    def test_real_uses_separate_workspace_and_cannot_reach_simulation_dashboard(self):
         page = self.run_page()
         page.button(key='jj_select_real').click().run(timeout=25)
         self.assertEqual(len(page.exception), 0)
         self.assertEqual(page.session_state['guard_calls'], 0)
-        self.assertTrue(any('no está habilitado' in i.value for i in page.info))
+        self.assertIn('real_accounts_connect',[b.key for b in page.button])
         self.assertFalse(any(m.value == 'SIMULATION_DASHBOARD' for m in page.markdown))
         page.button(key='jj_real_to_simulation').click().run(timeout=25)
         self.assertEqual(len(page.exception), 0)
