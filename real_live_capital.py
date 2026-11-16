@@ -54,6 +54,7 @@ class RealCapitalGuard:
         self.blocker='LIVE_ACCOUNT_NOT_CURRENT';self.external_working=False
         self.balance_observed_at=None
         self._broker_orders=[]
+        self.exit_refresh_requested=False
 
     def external_close_conflicts(self):
         """Unknown external sells freeze only the affected app-owned contract.
@@ -78,6 +79,43 @@ class RealCapitalGuard:
         return sorted(conflicts)
 
     def exit_permitted(self,contract):return contract not in self.external_close_conflicts()
+
+    def rejected_exit_retry_proof(self,parent,rejected,quantity):
+        """Local check only; request fresh background GETs instead of exit HTTP."""
+        self.exit_refresh_requested=True
+        try:
+            from schwab_execution_snapshot import normalize_execution_snapshot
+            from real_exit_recovery import validate_retry_proof
+            with self._lock:
+                now=aware(self.clock());observed=self.balance_observed_at
+                if (self.checked is None or observed is None or not timedelta(0)<=now-observed<timedelta(seconds=5)
+                        or self.account is None or str(self.account.get('accountNumber'))!=self.context.account_number):return None
+                positions=self.account.get('positions');orders=list(self._broker_orders)
+                if not isinstance(positions,list):return None
+                matches=[p for p in positions if (p.get('instrument') or {}).get('assetType')=='OPTION'
+                    and (p.get('instrument') or {}).get('symbol')==parent['contract']]
+                if len(matches)!=1:return None
+                position=matches[0]
+                if decimal(position.get('longQuantity',-1))!=quantity or decimal(position.get('shortQuantity',0))!=0:return None
+            rows=self.ledger.requests(self.context.binding)
+            if any(r['contract']==parent['contract'] and r['state'] in UNCERTAIN for r in rows):return None
+            if self.external_close_conflicts():return None
+            for order in orders:
+                if order.get('status') not in TERMINAL and any((leg.get('instrument') or {}).get('symbol')==parent['contract']
+                        for leg in order.get('orderLegCollection') or []):return None
+            for row in rejected:
+                raw=next((o for o in orders if str(o.get('orderId'))==row['broker_id']),None)
+                evidence=normalize_execution_snapshot(raw,account_number=self.context.account_number)
+                if (evidence.issues or evidence.status!='REJECTED' or evidence.fills
+                        or evidence.contract!=parent['contract'] or evidence.instruction!='SELL_TO_CLOSE'
+                        or evidence.quantity!=row['quantity']):return None
+            proof=dict(source='SCHWAB_POSITION_AND_ORDERS',binding=self.context.binding,parent_id=parent['id'],
+                contract=parent['contract'],quantity=quantity,rejected_ids=sorted(r['id'] for r in rejected),
+                observed_at=observed.isoformat(),valid_until=(observed+timedelta(seconds=5)).isoformat())
+            validate_retry_proof(proof,binding=self.context.binding,parent=parent,rejected=rejected,quantity=quantity,now=now)
+            self.exit_refresh_requested=False
+            return proof
+        except (ValueError,TypeError,KeyError,AttributeError,RuntimeError):return None
 
     def refresh(self):
         try:
@@ -165,10 +203,8 @@ class RealCapitalGuard:
         return self.permit['trade_cost']
 
     def funding_capacity(self):
-        """Preliminary cash filter; authorize still checks fees and reservations."""
-        with self._lock:
-            if not self.account_ready():raise ValueError('LIVE_ACCOUNT_NOT_CURRENT')
-            return self.capacity
+        """Spendable settled cash after reservations; exact preview includes fees."""
+        return decimal(self.budget_snapshot()['available'])
 
     def budget_snapshot(self):
         """Read-only, account-bound spending evidence; never creates a permit."""

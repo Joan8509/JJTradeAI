@@ -58,7 +58,8 @@ class BollingerContractTests(unittest.TestCase):
         later = start+timedelta(seconds=1)
         source = start+timedelta(milliseconds=500)
         signal = {'side': 'SUPERIOR', 'price': 104., 'candle': CANDLE.isoformat()}
-        payload = {'symbol': 'AAPL', 'provider': 'ALPACA', 'feed': 'iex',
+        from bollinger_phone_worker import STRATEGY_VERSION
+        payload = {'symbol': 'AAPL', 'provider': 'ALPACA', 'feed': 'iex', 'version':STRATEGY_VERSION,
                    'source_timestamp': source.isoformat(), 'received_at': source.isoformat(),
                    'checked_at': source.isoformat(), 'opening': 100., 'signal': signal}
         TickRepository(self.database).flush({'AAPL': payload}, [], state='CONECTADO',

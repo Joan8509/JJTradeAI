@@ -40,6 +40,7 @@ def seed(database):
             for start,p in zip(starts,closes) for m in range(15)]
     store = MarketBarStore(database)
     store.upsert_frame(pd.DataFrame(rows),symbol='AAPL',provider='ALPACA',feed='iex')
+    TickRepository(database)  # Same clock schema initialization as production.
     return store,closes[-20:]
 
 
@@ -136,15 +137,16 @@ class TickGeometryTests(unittest.TestCase):
         self.assertIsNotNone(self.observe(104.,4,4)[0]['signal'])
         self.assertIsNone(self.observe(100.,5,5)[0]['signal'])
 
-    def test_true_opening_outside_initial_bands_can_enter_current_bands_live(self):
+    def test_opening_outside_initial_bands_never_enters_after_bands_expand(self):
         self.observe(104.,1,1)
         snapshot,reason=self.observe(110.,2,2)
-        self.assertEqual(reason,'EXIT')
+        self.assertEqual(reason,'READY_NO_EXIT')
+        self.assertIsNone(snapshot['signal'])
         g=snapshot['geometry']
         self.assertEqual(snapshot['opening'],104.)
         self.assertGreater(g['opening'],g['initial_opening_upper'])
         self.assertLessEqual(g['opening'],g['upper'])
-        self.assertEqual(g['opening_reference'],'CURRENT_BANDS')
+        self.assertEqual(g['opening_reference'],'INITIAL_AND_CURRENT_BANDS')
 
     def test_previous_exposure_allows_only_new_inside_opening(self):
         for previous,price,side in ((103.,105.,'SUPERIOR'),(97.,95.,'INFERIOR')):
@@ -163,7 +165,8 @@ class TickGeometryTests(unittest.TestCase):
         self.store.upsert_bar(MarketBar('AAPL',CANDLE,100,105,99,102,100),provider='ALPACA',feed='iex')
         snapshot,reason=self.observe(104.,62,2)
         self.assertEqual(snapshot['opening'],100)
-        self.assertEqual(reason,'EXIT')
+        self.assertEqual(reason,'BREAKOUT_CLOCK_UNAVAILABLE')
+        self.assertIsNone(snapshot['signal'])
 
     def test_missed_or_earlier_out_of_order_opening_waits_for_official_bar(self):
         self.now=CANDLE+timedelta(seconds=5)

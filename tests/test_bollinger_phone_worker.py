@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from bollinger_phone_worker import detect_exit, detect_values, message_for, tick
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 class BollingerPhoneTests(unittest.TestCase):
@@ -169,8 +169,10 @@ class BollingerPhoneTests(unittest.TestCase):
         self.assertEqual(len(lines),4)
         self.assertIn("AAPL",lines[0])
         self.assertIn("Apple",lines[0])
-        self.assertEqual(lines[1],"Salida: superior")
-        self.assertIn("10:15 AM ET",lines[2])
+        self.assertIn("Salida: superior",lines[1])
+        self.assertIn("Precio 104.000000 · Banda 103.000000",lines[1])
+        self.assertIn("08/10/2026 10:15–10:30 ET",lines[2])
+        self.assertIn("Detectada 10:16:00",lines[2])
         self.assertIn("$45",lines[3])
         self.assertIn("$95",lines[3])
         self.assertNotIn("Medias",text)
@@ -194,6 +196,10 @@ class BollingerPhoneTests(unittest.TestCase):
                 db.execute("INSERT INTO live_bollinger_preview VALUES('AAPL',?)", (now.isoformat(),))
                 db.execute("CREATE TABLE minute_bars(symbol TEXT,provider TEXT,feed TEXT,timestamp TEXT)")
                 db.execute("INSERT INTO minute_bars VALUES('AAPL','alpaca','iex',?)", (now.replace(minute=16).isoformat(),))
+                db.execute('CREATE TABLE bollinger_breakout_clock(feed TEXT,scope TEXT,symbol TEXT,candle TEXT,side TEXT,first_at TEXT)')
+                for side in ('SUPERIOR','INFERIOR'):
+                    db.execute('INSERT INTO bollinger_breakout_clock VALUES(?,?,?,?,?,?)',
+                        ('iex','REGULAR','AAPL',now.replace(minute=15).isoformat(),side,(now-timedelta(seconds=5)).isoformat()))
             db.close()
             with patch("bollinger_phone_worker.enabled", return_value=True), \
                     patch("bollinger_phone_worker.connection", return_value={"chat_id": "1"}), \

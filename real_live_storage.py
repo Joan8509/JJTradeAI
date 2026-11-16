@@ -62,6 +62,19 @@ def _byte_lock(path):
 
 
 class RealEncryptedStore(EncryptedSchwabStore):
+    def _replace_file(self,temporary):
+        # Windows readers/antivirus can briefly deny replacement of a closed
+        # encrypted file. Retry only the atomic publication, under our existing
+        # file lock; never repeat encryption, a transaction body or broker HTTP.
+        for attempt,delay in enumerate((.01,.025,.05,.1,.2,.4,0)):
+            try:
+                temporary.replace(self.path)
+                return
+            except OSError as error:
+                if getattr(error,'winerror',None) not in (5,32,33) or attempt==6:
+                    raise
+                time.sleep(delay)
+
     @staticmethod
     def _owner():
         sid=_process_sid()

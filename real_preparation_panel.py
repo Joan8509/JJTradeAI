@@ -10,10 +10,38 @@ VIEWS=('Cuenta','Con mi saldo','Preparar compañías','Cola real','Operaciones y
 def _target(value):return 'Manual' if value=='MANUAL' else value+'%' if value else 'Elegir objetivo'
 
 
+def _last_entry_blockers(status):
+    """Keep the recorded first failure visible after the live signal retracts."""
+    labels={'NO_ELIGIBLE_EXPIRATION_OR_RANGE':'No apareció contrato con rango, spread y vencimiento permitidos',
+        'LIVE_SETTLED_CASH_INSUFFICIENT':'El contrato superaba el efectivo liquidado disponible',
+        'LIVE_PREVIEW_NOT_ACCEPTED':'Schwab no aceptó la previsualización',
+        'LIVE_PREVIEW_COSTS_INCOMPLETE':'Schwab no informó todos los costos',
+        'OPTION_QUOTE_NOT_CURRENT':'La cotización del contrato no estaba vigente',
+        'ENTRY_SPREAD_EXCEEDS_MAX':'El spread superaba el máximo permitido',
+        'SIGNAL_ENTRY_WINDOW_EXPIRED':'La señal venció antes de completar la entrada',
+        'TRADE_NOT_CURRENT':'Faltaba un precio reciente del activo'}
+    result={};attempts=status.get('entry_attempts') or {}
+    if not isinstance(attempts,dict):return result
+    for attempt in sorted((v for v in attempts.values() if isinstance(v,dict)),key=lambda v:v.get('checked_at','')):
+        symbol=attempt.get('symbol');failure=attempt.get('first_failure') or {}
+        if symbol and attempt.get('outcome')=='PREPARED_NOT_SENT':
+            result.pop(symbol,None);continue
+        if not symbol or not isinstance(failure,dict) or not failure.get('code'):continue
+        result[symbol]=labels.get(failure['code'],'Entrada no completada; requiere revisar el intento')
+    return result
+
+
 def _account():
     reader=st.session_state.get('real_account_reader');ref=st.session_state.get('real_selected_account_ref')
     try:return reader,ref,reader.preparation_binding(ref)
-    except Exception:return reader,ref,None
+    except Exception:
+        # A new browser session may display the account explicitly selected
+        # earlier. Never replace an explicit current selection or its errors.
+        if ref is None and not st.session_state.get('real_account_selection_cleared',False):
+            from real_dashboard_selection import saved_selection
+            saved=saved_selection()
+            if saved:return reader,ref,saved['binding']
+        return reader,ref,None
 
 
 def _go_account():st.session_state['real_workspace_view']='Cuenta'
@@ -27,6 +55,49 @@ def _runtime(binding):
         from real_live_control import RealRuntimeProxy
         runtime=RealRuntimeProxy(binding);st.session_state['real_execution_runtime']=runtime
     return runtime
+
+
+def _queue_controls(runtime,plan,ready,visible,removable):
+    """Always visible controls; only untouched waiting rows can be removed."""
+    paused=bool(plan.get('paused'))
+    session_current=datetime.now(timezone.utc)<datetime.fromisoformat(plan['session_close'])
+    can_resume=ready and session_current and not plan.get('entry_owner') and not plan.get('entry_consumed') and any(
+        r['state']=='PAUSED' for r in removable) and not any(
+        r['state'] in ('SUBMITTING','ORDER_SENT','REQUIRES_REVIEW') for r in plan['rows'])
+    if plan.get('entry_consumed') and not visible:
+        st.info('Esta cola ya completó su operación. Las demás compañías quedaron fuera de la entrada automática; no hay compañías esperando una compra.')
+    elif not visible:
+        st.caption('No hay compañías en espera que puedas pausar o eliminar.')
+    elif paused and not session_current:
+        st.caption('La sesión de esta cola terminó. Activa una preparación para la próxima sesión desde «Preparar compañías».')
+    left,right=st.columns(2)
+    if left.button('Activar' if paused else 'Pausar',key='real_queue_toggle',
+            disabled=(paused and not can_resume) or (not paused and not visible),width='stretch'):
+        try:
+            if paused:runtime.resume(plan['id'])
+            else:runtime.pause()
+            st.session_state['real_queue_notice']='Compañías activas bajo el radar.' if paused else 'Compras pausadas. El seguimiento de salidas continúa.'
+            st.rerun()
+        except Exception:
+            st.error('No se pudo cambiar el estado. Si la sesión terminó, activa una nueva preparación; una compra en curso conserva su seguimiento.')
+    if right.button('Eliminar todas las compañías en espera',key='real_queue_clear',disabled=not removable,width='stretch'):
+        try:
+            runtime.remove_waiting(plan['id'])
+            st.session_state['real_queue_notice']='Compañías en espera eliminadas. Las operaciones iniciadas conservan su seguimiento.'
+            st.rerun()
+        except Exception:st.error('No se pudo vaciar la espera. La cola puede haber cambiado.')
+    selected=None;choices={r['id']:r['symbol'] for r in removable}
+    if choices:
+        selected=st.selectbox('Compañía que quieres quitar de la cola',list(choices),
+            format_func=choices.get,key='real_queue_remove_choice_'+plan['id'])
+    if st.button('Quitar compañía de la cola real',key='real_queue_remove',disabled=not choices,width='stretch'):
+        try:
+            runtime.remove(plan['id'],selected)
+            st.session_state['real_queue_notice']=choices[selected]+' quitada de la cola real.'
+            st.rerun()
+        except Exception:
+            st.error('No se pudo quitar. La cola puede haber cambiado o tener una compra en curso.')
+    st.caption('Pausar o quitar compañías solo detiene nuevas entradas. Las salidas de operaciones abiertas siguen activas.')
 
 
 def render_real_workspace():
@@ -58,7 +129,7 @@ def _render_real_view(view):
     reader,ref,binding=_account()
     if service.account_binding!=binding:
         service.preparation=None;service.last_result=None
-    runtime=st.session_state.get('real_execution_runtime')
+    runtime=_runtime(binding)
     try:connected=runtime is not None and runtime.binding==binding and runtime.can_arm()
     except Exception:connected=False
     st.info('Configuración de operaciones reales · Revisa el estado en «Cola real».' if connected else
@@ -66,7 +137,13 @@ def _render_real_view(view):
     if binding is None:
         st.caption('Consulta y selecciona tu cuenta para preparar las compañías de la cola real.')
         st.button('Consultar mi cuenta',on_click=_go_account,key='real_prep_go_account')
-    else:st.caption(reader.snapshot['account_label']+' · Preparación independiente de la simulación')
+    else:
+        snapshot=getattr(reader,'snapshot',None)
+        if snapshot:label=snapshot['account_label']
+        else:
+            from real_dashboard_selection import saved_selection
+            saved=saved_selection();label=saved['label'] if saved and saved['binding']==binding else 'Cuenta seleccionada'
+        st.caption(label+' · Preparación independiente de la simulación')
     if view=='Con mi saldo':
         from real_affordability_panel import render_affordability
         render_affordability(binding)
@@ -84,6 +161,7 @@ def _queue(service,reader,reference,binding):
     runtime=_runtime(binding)
     try:status=runtime.status()
     except Exception:status={}
+    last_blockers=_last_entry_blockers(status)
     # Only a server-owned runtime may be installed here. Loading a page, editing
     # rows or selecting Real never constructs a gateway or starts a worker.
     ready=False
@@ -172,46 +250,17 @@ def _queue(service,reader,reference,binding):
                     return messages.get(followup.get(row['symbol']),'Esperando estrategia válida')
                 return 'Esperando estrategia válida'
             visible=[r for r in plan['rows'] if r['state'] not in ('REMOVED','EXPIRED','COMPLETED','EXCLUDED_FIRST_ENTRY')]
-            st.caption('Compañías en esta cola: '+str(len(visible)))
-            if visible:
-                st.dataframe([{'Compañía':r['symbol'],'Contratos':r['quantity'],'Objetivo':_target(r['target']),
-                    'Estado':row_state(r),'Seguimiento':row_followup(r)}
-                    for r in visible],hide_index=True,width='stretch')
-            else:st.info('No hay compañías en espera de operar. Puedes activarlas desde «Preparar compañías».')
             removable=[r for r in visible if r['state'] in ('ARMED','PAUSED') and
                 not r.get('request_id') and not r.get('claim') and plan.get('entry_owner')!=r['id']]
-            if removable:
-                choices={r['id']:r['symbol'] for r in removable}
-                selected=st.selectbox('Compañía que quieres quitar de la cola',list(choices),
-                    format_func=choices.get,key='real_queue_remove_choice_'+plan['id'])
-                if st.button('Quitar compañía de la cola real',key='real_queue_remove',width='stretch'):
-                    try:
-                        runtime.remove(plan['id'],selected)
-                        st.session_state['real_queue_notice']=choices[selected]+' quitada de la cola real.'
-                        st.rerun()
-                    except Exception:
-                        st.error('No se pudo quitar. Actualiza la cola: puede haber cambiado o tener una compra en curso.')
-            if removable:
-                paused=bool(plan.get('paused'))
-                session_current=datetime.now(timezone.utc)<datetime.fromisoformat(plan['session_close'])
-                can_resume=ready and session_current and not plan.get('entry_owner') and not plan.get('entry_consumed') and not any(
-                    r['state'] in ('SUBMITTING','ORDER_SENT','REQUIRES_REVIEW') for r in plan['rows'])
-                if paused and not session_current:st.caption('La sesión de esta cola terminó. Activa una preparación para la próxima sesión desde «Preparar compañías».')
-                if st.button('Activar' if paused else 'Pausar',key='real_queue_toggle',
-                        disabled=paused and not can_resume,width='stretch'):
-                    try:
-                        if paused:runtime.resume(plan['id'])
-                        else:runtime.pause()
-                        st.session_state['real_queue_notice']='Compañías activas bajo el radar.' if paused else 'Compras pausadas. El seguimiento de salidas continúa.'
-                        st.rerun()
-                    except Exception:
-                        st.error('No se pudo cambiar el estado. Si la sesión terminó, activa una nueva preparación; una compra en curso conserva su seguimiento.')
-                if st.button('Eliminar todas las compañías en espera',key='real_queue_clear',width='stretch'):
-                    try:
-                        runtime.remove_waiting(plan['id'])
-                        st.session_state['real_queue_notice']='Compañías en espera eliminadas. Las operaciones iniciadas conservan su seguimiento.'
-                        st.rerun()
-                    except Exception:st.error('No se pudo vaciar la espera. La cola puede haber cambiado.')
+            st.caption('Compañías en esta cola: '+str(len(visible)))
+            _queue_controls(runtime,plan,ready,visible,removable)
+            if visible:
+                st.dataframe([{'Compañía':r['symbol'],'Contratos':r['quantity'],'Objetivo':_target(r['target']),
+                    'Estado':row_state(r),'Seguimiento':row_followup(r),
+                    'Último impedimento de entrada':last_blockers.get(r['symbol'],'Sin intento registrado')
+                        if r['state'] in ('ARMED','PAUSED') else '—'}
+                    for r in visible],hide_index=True,width='stretch')
+            else:st.info('No hay compañías en espera de operar. Puedes activarlas desde «Preparar compañías».')
         else:st.info('No hay compañías activadas. Elige las compañías y pulsa «Activar preparación» en «Preparar compañías».')
     if runtime is not None and hasattr(runtime,'positions'):
         try:positions=runtime.positions()
@@ -245,17 +294,24 @@ def _select_symbols(values):st.session_state['real_prep_symbols']=list(values)
 def _editor(service,binding):
     universe=watched_symbols();scope=binding or 'UNSELECTED'
     models=st.session_state.setdefault('real_prep_models',{})
+    if binding is not None and scope not in models:
+        try:saved=service.load(binding)
+        except Exception:saved=None
+        if saved:
+            rows={r['symbol']:dict(r) for r in saved['rows'] if r['symbol'] in universe}
+            models[scope]=dict(selected=list(rows),rows=rows,generation=0)
     model=models.setdefault(scope,dict(selected=[],rows={},generation=0))
     if st.session_state.get('real_prep_widget_scope')!=scope:
         st.session_state['real_prep_widget_scope']=scope
         st.session_state['real_prep_symbols']=list(model['selected'])
     st.subheader('Preparar compañías')
     st.caption('Selecciona una, varias o todas; aplica cantidad y objetivo. «Activar preparación» las deja bajo el radar para comprar automáticamente con dinero real al detectar una entrada válida.')
-    left,right=st.columns(2)
-    left.button('Seleccionar todas',on_click=_select_symbols,args=(universe,),key='real_prep_all',width='stretch')
-    right.button('Quitar selección',on_click=_select_symbols,args=((),),key='real_prep_none',width='stretch')
+    st.button('Seleccionar todas',on_click=_select_symbols,args=(universe,),key='real_prep_all',width='stretch')
     if 'real_prep_symbols' not in st.session_state:st.session_state['real_prep_symbols']=list(model['selected'])
     selected=st.multiselect('Compañías',universe,key='real_prep_symbols')
+    st.button('Quitar todas las compañías de esta preparación',on_click=_select_symbols,args=((),),
+        key='real_prep_none',disabled=not selected,width='stretch')
+    st.caption('Este botón limpia la preparación. Las compañías ya activadas se gestionan en «Cola real».')
     if list(selected)!=model['selected']:
         model['selected']=list(selected);model['generation']+=1
     for symbol in selected:model['rows'].setdefault(symbol,dict(symbol=symbol,quantity=1,target=None))
@@ -284,7 +340,17 @@ def _editor(service,binding):
     runtime=_runtime(binding)
     try:ready=runtime is not None and runtime.can_arm()
     except Exception:ready=False
-    if not ready:st.caption('Para activar, selecciona tu cuenta en «Cuenta» y espera que el ejecutor confirme la conexión.')
+    if not ready:
+        try:codes=runtime.status().get('blockers',[]) if runtime is not None else []
+        except Exception:codes=[]
+        if binding is None:
+            st.warning('Para activar, selecciona tu cuenta en «Cuenta».')
+        elif 'LIVE_OPTION_DATA_REAUTHORIZE' in codes:
+            st.warning('Tu cuenta ya está seleccionada. Falta renovar la autorización de JJTradeAI-Datos en Schwab para consultar opciones. No hace falta volver a seleccionar la cuenta.')
+        elif 'LIVE_OPTION_DATA_AUTH_NOT_CURRENT' in codes:
+            st.info('Tu cuenta ya está seleccionada. Esperando que el ejecutor compruebe la conexión de datos de opciones.')
+        else:
+            st.caption('La cuenta está seleccionada. Revisa el motivo pendiente en «Cola real»; todavía no se puede activar la preparación.')
     if st.button('Activar preparación',key='real_prep_activate',disabled=not ready,type='primary',width='stretch'):
         try:
             if _account()[2]!=binding:raise ValueError('ACCOUNT_SELECTION_REQUIRED')

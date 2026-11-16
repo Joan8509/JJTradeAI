@@ -9,6 +9,17 @@ from real_trade_notices import RealTradeNotices
 
 
 class RealNoticeTests(TestCase):
+    def test_uncertain_buy_alerts_without_fill_or_repeat_post_or_historical_replay(self):
+        row=self.f.enter(target='10')
+        # The real fixture exposes its journal through ledger.store_factory.
+        store=self.f.ledger.store_factory()
+        store.data['requests'][row['id']].update(state='SUBMITTING',broker_id=None)
+        self.f.now+=timedelta(seconds=6)
+        self.notices.step();self.notices.step()
+        self.sender.assert_called_once()
+        self.assertIn('CONFIRMACIÓN REAL PENDIENTE',self.sender.call_args.args[0])
+        self.assertNotIn('COMPRA REAL CONFIRMADA',self.sender.call_args.args[0])
+
     def test_real_sender_uses_existing_vps_profile_without_injecting_environment(self):
         profile=dict(TELEGRAM_BOT_TOKEN='SYNTHETIC_TOKEN',TELEGRAM_CHAT_ID='123')
         with patch('vps_private_runtime.load_config',return_value=profile),patch('telegram_alerts.call',

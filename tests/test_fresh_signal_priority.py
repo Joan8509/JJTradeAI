@@ -49,9 +49,12 @@ class FreshSignalPriorityTests(unittest.TestCase):
         companion=runtime_fixture.TelegramRuntimeTests().companion()
         companion.entry_queue=Mock();companion.entry_queue.step.return_value=True
         def stop(*args):companion.stop.set()
-        with patch.object(companion.stop,'wait',side_effect=stop) as wait:
+        with patch('market_signal_wakeup.SignalWakeup') as factory:
+            wake=factory.return_value
+            wake.wait.side_effect=stop
             companion._entries()
-        wait.assert_called_once_with(0);companion.api.assert_not_called()
+        wake.wait.assert_called_once_with(0);wake.close.assert_called_once_with()
+        companion.api.assert_not_called()
 
     def test_new_key_cannot_bypass_provider_rate_limit_backoff(self):
         from schwab_connection import SchwabError

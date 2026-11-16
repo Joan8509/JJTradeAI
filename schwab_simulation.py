@@ -197,6 +197,9 @@ def validated_signal(snapshot, runtime, controls, now):
     if not all((fresh(source, now, 3), fresh(source, received, 3), fresh(source, checked, 3),
                 fresh(received, now, 3), fresh(checked, now, 3))):
         raise ExecutionBlocked('TRADE_NOT_CURRENT')
+    from bollinger_breakout_clock import breakout_deadline
+    try:breakout_deadline(signal,aware(now))
+    except ValueError:raise ExecutionBlocked('SIGNAL_ENTRY_WINDOW_EXPIRED') from None
     candle = datetime.fromisoformat(canonical_candle(signal['candle']))
     official_candle = aware(controls.session_opens)+timedelta(minutes=15*int(
         (aware(source)-aware(controls.session_opens)).total_seconds()//900))

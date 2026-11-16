@@ -9,6 +9,50 @@ from tests import test_real_execution_service as cycle
 
 
 class RuntimeTests(TestCase):
+    def test_live_worker_passes_signal_hint_reader_without_blocking_exit_loop(self):
+        entered=Event();exited=Event()
+        hints=lambda symbols:frozenset(symbols)
+        queue=Mock();execution=Mock(binding='a'*64)
+        execution.poll.side_effect=lambda:(exited.set(),[])[-1]
+        queue.step.side_effect=lambda *args,**kwargs:entered.set()
+        worker=RealExecutionWorker(queue,execution,Mock(),signal_symbols=hints)
+        try:
+            worker.start()
+            self.assertTrue(entered.wait(1));self.assertTrue(exited.wait(1))
+            self.assertIs(queue.step.call_args.kwargs['signal_symbols'],hints)
+            self.assertEqual(worker.status()['entry_signal_hints_revision'],1)
+        finally:worker.shutdown()
+
+    def test_order_receipt_and_cancel_wake_the_observer_without_waiting_for_poll_interval(self):
+        f=cycle.RealExecutionCycleTests();f.setUp()
+        worker=RealExecutionWorker(Mock(),f.service,Mock(),separate_observation=True)
+        self.assertFalse(worker._order_wake.is_set())
+        row=f.enter();self.assertTrue(worker._order_wake.is_set())
+        worker._order_wake.clear()
+        f.coordinator.cancel(f.service.binding,row['id'])
+        self.assertTrue(worker._order_wake.is_set())
+        self.assertFalse(worker.status()['started'])
+
+    def test_confirmed_fills_wake_target_and_notice_roles(self):
+        f=cycle.RealExecutionCycleTests();f.setUp()
+        worker=RealExecutionWorker(Mock(),f.service,Mock(),separate_observation=True)
+        row=f.enter();f.broker(row,2,'FILLED')
+        original=f.service.observe_orders
+        def observe():
+            result=original();worker._stop.set();return result
+        f.service.observe_orders=observe
+        worker._loop('orders',1)
+        self.assertTrue(worker._target_wake.is_set());self.assertTrue(worker._notice_wake.is_set())
+
+    def test_a_sale_that_never_reached_http_is_not_a_healthy_exit_turn(self):
+        execution=Mock(binding='a'*64);worker=RealExecutionWorker(Mock(),execution,Mock(),separate_observation=True)
+        def monitor():
+            worker._stop.set()
+            return [dict(state='EXPIRED',issues=['ORDER_HTTP_NOT_ATTEMPTED'])]
+        execution.monitor_positions.side_effect=monitor
+        worker._loop('exits',.2)
+        self.assertEqual(worker.status()['errors']['exits'],'LIVE_MONITOR_REQUIRES_REVIEW')
+
     def test_slow_manual_close_discovery_never_holds_price_or_entry_threads(self):
         release=Event();discovery=Event();prices=Event();entries=Event()
         execution=Mock(binding='a'*64);queue=Mock();external=Mock()

@@ -13,7 +13,7 @@ import sqlite3
 import time
 
 from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT, measure_band_expansion
-from bollinger_phone_worker import STRATEGY_VERSION, detect_values
+from bollinger_phone_worker import STRATEGY_VERSION, detect_values, opening_bands_from_moments
 
 MAX_SYMBOLS = 30
 MAX_READ_SECONDS = .25
@@ -94,19 +94,29 @@ def describe(snapshot, symbol, now):
         row.update({k: values[k] for k in ('opening', 'price', 'upper', 'lower')})
         row.update(upper_pct=expansion.upper_pct, lower_pct=expansion.lower_pct)
         opening_inside = values['lower'] <= values['opening'] <= values['upper']
+        initial_upper,initial_lower=g.get('initial_opening_upper'),g.get('initial_opening_lower')
+        if initial_upper is None and initial_lower is None:
+            initial_upper,initial_lower=opening_bands_from_moments(values['price'],values['upper'],
+                values['lower'],values['mid'],values['opening'])
+        initial_inside=bool(initial_upper is not None and initial_lower is not None
+            and initial_lower<=values['opening']<=initial_upper)
         up = values['price'] > values['upper'] and values['price'] > values['opening']
         down = values['price'] < values['lower'] and values['price'] < values['opening']
         direction = up or down
         midpoint = (up and values['mid'] > values['previous_mid']) or (down and values['mid'] < values['previous_mid'])
-        row['checks'] = dict(opening_inside=opening_inside,
+        row['checks'] = dict(opening_inside=opening_inside,opening_inside_initial=initial_inside,
             upper_expansion=expansion.upper_pct >= MINIMUM_BAND_EXPANSION_PCT,
             lower_expansion=expansion.lower_pct >= MINIMUM_BAND_EXPANSION_PCT,
             directional_exit=direction, midpoint=midpoint)
+        crossing=g.get('breakout_clock')
+        if crossing:
+            row['checks']['breakout_current']=_stamp(crossing['first_at'])<=now<_stamp(crossing['deadline'])
         row['missing'] = [k for k, passed in row['checks'].items() if not passed]
         # Reuse the strategy's actual arithmetic instead of making a new gate.
         row['geometry_side'] = detect_values(values['opening'], values['previous_upper'],
             values['previous_lower'], values['previous_mid'], values['price'], values['upper'],
-            values['lower'], values['mid'], opening=values['opening'])
+            values['lower'], values['mid'], opening=values['opening'],
+            opening_upper=g.get('initial_opening_upper'),opening_lower=g.get('initial_opening_lower'))
         runtime = snapshot.get('runtime') or {}
         session = snapshot.get('session')
         if tick.get('version') != STRATEGY_VERSION:
@@ -119,6 +129,10 @@ def describe(snapshot, symbol, now):
             row['status'] = 'COLLECTOR_NOT_CURRENT'
         elif not 0 <= age <= 3:
             row['status'] = 'TRADE_NOT_CURRENT'
+        elif tick.get('reason')=='BREAKOUT_CLOCK_UNAVAILABLE':
+            row['status']='BREAKOUT_CLOCK_UNAVAILABLE'
+        elif tick.get('reason')=='BREAKOUT_ENTRY_WINDOW_EXPIRED' or row['checks'].get('breakout_current') is False:
+            row['status']='BREAKOUT_ENTRY_WINDOW_EXPIRED'
         elif tick.get('reason') != 'EXIT':
             row['status'] = 'DETECTOR_NOT_EXIT' if row['geometry_side'] else 'NO_MATCH'
         elif not row['geometry_side'] or (tick.get('signal') or {}).get('side') != row['geometry_side']:

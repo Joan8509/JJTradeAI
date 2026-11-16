@@ -15,6 +15,17 @@ from schwab_target_limit import target_candidate,confirm_target_preview
 
 
 class BrokerTargetTests(TestCase):
+    def test_target_that_never_reached_http_reports_pending_and_backs_off(self):
+        from schwab_order_gateway import OrderNotDispatched
+        self.f.own(target='10')
+        self.f.gateway.submit.side_effect=OrderNotDispatched('ORDER_AUTHORIZATION_UNAVAILABLE')
+        self.targets.step()
+        state=self.targets.status()[self.f.ledger.requests(journal.BINDING)[0]['contract']]
+        self.assertTrue(state['error']);self.assertFalse(state['review'])
+        self.assertEqual(state['state'],'BROKER_TARGET_EXPIRED')
+        self.assertEqual(self.f.gateway.submit.call_count,2)
+        self.targets.step();self.assertEqual(self.f.gateway.submit.call_count,2)
+
     def setUp(self):
         self.f=cycle.RealExecutionCycleTests();self.f.setUp()
         self.preview=Mock();self.preview.preview.side_effect=self.report

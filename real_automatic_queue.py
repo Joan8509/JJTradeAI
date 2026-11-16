@@ -10,7 +10,7 @@ from pathlib import Path
 import secrets
 from threading import RLock
 
-from real_order_ledger import RealOrderBlocked, TERMINAL
+from real_order_ledger import RealOrderBlocked, TERMINAL, UNCERTAIN
 from real_trade_preparation import normalize_rows, _binding
 from schwab_connection import aware
 from real_live_storage import RealEncryptedStore as EncryptedSchwabStore
@@ -139,7 +139,7 @@ class RealAutomaticQueue:
             return plan
         return self._change(binding,plan_id,row_id,withdraw)
 
-    def step(self,binding,execution,prepare_entry,*,monitor=True):
+    def step(self,binding,execution,prepare_entry,*,monitor=True,signal_symbols=None):
         """One bounded scheduler turn. Exits run even if queue is paused/empty.
 
         prepare_entry(row) supplies the exact arguments of execution.enter,
@@ -153,7 +153,14 @@ class RealAutomaticQueue:
             plan=self.read(binding)
             if not plan:return events
             now=aware(self.clock())
+            hints=None;hints_read=False
             for row in plan['rows']:
+                if row['state']=='REQUIRES_REVIEW' and row.get('request_id'):
+                    recovered=next((r for r in execution.ledger.requests(binding)
+                        if r['id']==row['request_id'] and r.get('intent')==row.get('claim')),None)
+                    if recovered and recovered.get('broker_id') and recovered['state'] not in UNCERTAIN:
+                        self._change(binding,plan['id'],row['id'],lambda p,r:r.update(state='ORDER_SENT'))
+                        row['state']='ORDER_SENT'
                 if row['state']=='ORDER_SENT':
                     orders=execution.ledger.requests(binding)
                     buy=next((r for r in orders if r['id']==row['request_id']),None)
@@ -187,6 +194,14 @@ class RealAutomaticQueue:
                     self._change(binding,plan['id'],row['id'],lambda p,r:r.update(state='EXPIRED'))
                     continue
                 if now<aware(datetime.fromisoformat(plan['session_open'])):continue
+                if signal_symbols is not None:
+                    if not hints_read:
+                        hints_read=True
+                        try:
+                            hints=signal_symbols(tuple(r['symbol'] for r in plan['rows'] if r['state']=='ARMED'))
+                            if not isinstance(hints,(set,frozenset)):hints=None
+                        except Exception:hints=None
+                    if hints is not None and row['symbol'] not in hints:continue
                 # Give the provider the existing signal boundary before any
                 # chain/preview HTTP. The authoritative check below remains.
                 candidate=deepcopy(row)
@@ -226,6 +241,7 @@ class RealAutomaticQueue:
                     # Includes a crash/failed journal save/ambiguous broker send.
                     # Never renew this signal or clear its durable claim.
                     safe=False;retry_same=False
+                    request=None
                     try:
                         journal=execution.ledger.requests(binding)
                         if isinstance(journal,list):
@@ -237,6 +253,7 @@ class RealAutomaticQueue:
                     except Exception:pass
                     def failed(current,item):
                         item['state']='ARMED' if safe and not current['paused'] else 'REQUIRES_REVIEW'
+                        if request is not None and not safe:item['request_id']=request['id']
                         if safe:item['claim']=None
                         if retry_same:item['used_signals'].remove(key)
                         if safe and current.get('first_entry_only') and not current.get('entry_consumed'):

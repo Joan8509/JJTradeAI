@@ -80,7 +80,7 @@ class RealOrderLedger:
 
     def prepare(self,binding,*,intent,contract,instruction,quantity,limit,expires_at,price_increment,
                 exit_plan=None,parent_id=None,enforce_symbol_exposure=False,price_validation='VERIFIED_INCREMENT',estimated_cost=None,
-                price_proof=None,exit_role=None):
+                price_proof=None,exit_role=None,exit_retry_proof=None):
         """Reserve only owned closes; persist no inferred account-wide positions."""
         _key(binding);positive_int(quantity)
         if (not isinstance(intent,str) or not 1<=len(intent)<=256 or
@@ -146,6 +146,16 @@ class RealOrderLedger:
                     parent_owned-=filled
                     if child['state'] not in TERMINAL:parent_owned-=child['quantity']-filled
                 if quantity>parent_owned:raise RealOrderBlocked('CLOSE_PARENT_QUANTITY_NOT_OWNED')
+                from real_exit_recovery import unresolved_rejections,validate_retry_proof
+                rejected=unresolved_rejections(parent,[r for r in rows if r.get('parent_id')==parent_id])
+                if rejected or exit_retry_proof is not None:
+                    validate_retry_proof(exit_retry_proof,binding=binding,parent=parent,
+                        rejected=rejected,quantity=quantity,now=now)
+                    parent['exit_recovery_used']=True
+                    parent['resolved_exit_rejections']=sorted(set(parent.get('resolved_exit_rejections',()))|
+                        {r['id'] for r in rejected})
+                    doc['events'].append(dict(request=parent_id,exit_recovery_proof=deepcopy(exit_retry_proof),at=now.isoformat()))
+            elif exit_retry_proof is not None:raise RealOrderBlocked('CLOSE_PARENT_INVALID')
             identity=secrets.token_hex(16)
             row=dict(id=identity,account=binding,intent=intent,contract=contract,instruction=instruction,
                 quantity=quantity,limit=str(limit),expires_at=expires.isoformat(),broker_id=None,
@@ -153,6 +163,9 @@ class RealOrderLedger:
             if exit_plan is not None:row['exit_plan']=deepcopy(exit_plan)
             if estimated_cost is not None:row['estimated_cost']=str(decimal(estimated_cost))
             if parent_id is not None:row['parent_id']=parent_id
+            if exit_retry_proof is not None:
+                row['exit_recovery_proof']=deepcopy(exit_retry_proof)
+                parent['exit_recovery_request']=identity
             if price_proof is not None:row['price_proof']=deepcopy(price_proof);row['exit_role']=exit_role
             doc['requests'][identity]=row;self._event(doc,row,'PREPARED')
             return deepcopy(row)
@@ -184,11 +197,24 @@ class RealOrderLedger:
             if row['state']!='PREPARED' or row.get('broker_id'):
                 raise RealOrderBlocked('REQUEST_MAY_HAVE_BEEN_DISPATCHED')
             row['issues']=['LOCAL_REQUEST_NOT_DISPATCHED'];row['terminal_state']='EXPIRED'
+            self._release_exit_retry(doc,row)
             self._event(doc,row,'EXPIRED');return deepcopy(row)
+
+    @staticmethod
+    def _release_exit_retry(doc,row):
+        proof=row.get('exit_recovery_proof')
+        if not proof:return
+        parent=doc['requests'].get(row.get('parent_id'))
+        if parent and parent.get('exit_recovery_request')==row['id']:
+            parent['exit_recovery_used']=False
+            parent['resolved_exit_rejections']=sorted(set(parent.get('resolved_exit_rejections',()))-set(proof['rejected_ids']))
+            parent.pop('exit_recovery_request',None)
 
     def submission_result(self,binding,identity,broker_id=None):
         with self._document(write=True) as doc:
             row=self._row(doc,binding,identity)
+            if isinstance(broker_id,str) and row.get('broker_id')==broker_id:
+                return deepcopy(row) # Independent receipt recovery already committed it.
             if row['state']!='SUBMITTING':raise RealOrderBlocked('SUBMISSION_STATE_INVALID')
             valid=isinstance(broker_id,str) and re.fullmatch('[0-9]{1,32}',broker_id)
             if valid and any(r['account']==binding and r['broker_id']==broker_id for r in doc['requests'].values()):valid=False
@@ -202,7 +228,21 @@ class RealOrderLedger:
             if row['state']!='SUBMITTING' or row.get('broker_id') or row['fills']:
                 raise RealOrderBlocked('REQUEST_MAY_HAVE_BEEN_DISPATCHED')
             row['issues']=['ORDER_HTTP_NOT_ATTEMPTED',code if re.fullmatch('[A-Z_]{1,100}',code) else 'ORDER_PREPARATION_FAILED']
+            self._release_exit_retry(doc,row)
             row['terminal_state']='EXPIRED';self._event(doc,row,'EXPIRED');return deepcopy(row)
+
+    def recover_submission_receipt(self,binding,identity,broker_id):
+        if not isinstance(broker_id,str) or not re.fullmatch('[0-9]{1,32}',broker_id):
+            raise RealOrderBlocked('ORDER_RECEIPT_INVALID')
+        with self._document(write=True) as doc:
+            row=self._row(doc,binding,identity)
+            if row.get('broker_id')==broker_id:return deepcopy(row)
+            if row.get('broker_id') or row['state'] not in ('SUBMITTING','UNCERTAIN') or row['fills']:
+                raise RealOrderBlocked('SUBMISSION_STATE_INVALID')
+            if any(r['account']==binding and r.get('broker_id')==broker_id for r in doc['requests'].values()):
+                raise RealOrderBlocked('BROKER_ORDER_IDENTITY_MISMATCH')
+            row['broker_id']=broker_id
+            self._event(doc,row,'ACKNOWLEDGED');return deepcopy(row)
 
     def reconcile(self,binding,identity,payload):
         """Only exact confirmed IDs; partial fills and identities never regress."""
@@ -383,8 +423,34 @@ class RealOrderCoordinator:
     risk, session and exit-monitor readiness before issuing its submission grant.
     Selecting a UI view or saving a draft never supplies such a grant.
     """
-    def __init__(self,ledger,gateway,submission_grant):
+    def __init__(self,ledger,gateway,submission_grant,*,receipts=None):
         self.ledger=ledger;self.gateway=gateway;self.grant=submission_grant
+        self.receipts=receipts
+        self._pending_results={}
+        self.submission_observer=None
+
+    def _wake_observer(self):
+        if callable(self.submission_observer):
+            try:self.submission_observer()
+            except Exception:pass
+
+    def recover_receipts(self,binding):
+        from real_submission_receipts import fingerprint
+        receipts=self.receipts.read(binding) if self.receipts is not None else []
+        receipts+=list(self._pending_results.values())
+        rows={r['id']:r for r in self.ledger.requests(binding)}
+        for receipt in receipts:
+            if receipt['account']!=binding:continue
+            row=rows.get(receipt['request'])
+            if row is None or fingerprint(row)!=receipt['fingerprint']:
+                raise RealOrderBlocked('ORDER_RECEIPT_IDENTITY_MISMATCH')
+            if row.get('broker_id'):
+                if row['broker_id']!=receipt['broker_id']:raise RealOrderBlocked('ORDER_RECEIPT_IDENTITY_MISMATCH')
+            elif row['state'] in ('SUBMITTING','UNCERTAIN'):
+                # UNCERTAIN is not permission to POST again. Rebind only an
+                # authentic, locally persisted exact-ID receipt, then normal GET.
+                self.ledger.recover_submission_receipt(binding,row['id'],receipt['broker_id'])
+            self._pending_results.pop(row['id'],None)
 
     def submit(self,binding,identity):
         from schwab_order_gateway import OrderNotDispatched
@@ -393,7 +459,17 @@ class RealOrderCoordinator:
         try:broker_id=self.gateway.submit(row)
         except OrderNotDispatched as error:return self.ledger.submission_not_attempted(binding,identity,error.code)
         except Exception:broker_id=None
-        return self.ledger.submission_result(binding,identity,broker_id)
+        if broker_id is not None:
+            from real_submission_receipts import fingerprint
+            self._pending_results[identity]=dict(account=binding,request=identity,
+                broker_id=broker_id,fingerprint=fingerprint(row))
+            if self.receipts is not None:
+                # Independent durable copy before the normal journal update.
+                # If this local save fails, still try the journal; no HTTP retry.
+                try:self.receipts.record(row,broker_id)
+                except Exception:pass
+        try:return self.ledger.submission_result(binding,identity,broker_id)
+        finally:self._wake_observer()
 
     def cancel(self,binding,identity):
         from schwab_order_gateway import OrderNotDispatched
@@ -402,7 +478,8 @@ class RealOrderCoordinator:
         try:accepted=self.gateway.cancel(row) is True
         except OrderNotDispatched:return self.ledger.cancellation_not_attempted(binding,identity)
         except Exception:accepted=False
-        return self.ledger.cancel_result(binding,identity,accepted=accepted)
+        try:return self.ledger.cancel_result(binding,identity,accepted=accepted)
+        finally:self._wake_observer()
 
 
 def production_gateway():

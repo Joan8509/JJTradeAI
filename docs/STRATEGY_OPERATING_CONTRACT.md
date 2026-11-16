@@ -1,5 +1,54 @@
 # Reglas estables de JJTrade AI
 
+13/11/2026: preparación REAL de catálogos ampliada a la sesión de la cola,
+incluida recuperación de autorización de datos. Solo compañías ARMED, hilo
+separado y metadata; conserva cotizaciones, preview, fondos y frescura originales.
+No cambia estrategia ni salidas. Detalle: REAL_ENTRY_PREPARATION.md. Estado de
+carga y comprobaciones en CURRENT_CONTEXT.
+
+Actualizacion06/11/2026, peticion de corregir avisos tardios SPCX/META/AAPL/TSLA:
+version v7_ruptura_temprana_30s limita nuevas oportunidades a30segundos desde la
+PRIMERA salida observada por cada lado en esa vela, aunque todavia no cumpla3%.
+Si el3% llega minutos despues, no publicar señal ni autorizar compra nueva.
+Es un endurecimiento del inicio del reloj respecto a esperar la primera señal
+con todas las condiciones; no describirlo como regla anterior ya implantada.
+No esperar30segundos: una ruptura valida puede operar inmediatamente. Primer
+instante no se renueva por retraccion, actualizacion de referencias, pausa o
+reconexion. Persistir porfeed/alcance/simbolo/vela/lado, claves previas y dedup
+intactas. Mantener tambien la caducidad de primera señal, frescura3s, apertura
+inicial dentro, expansion3%, objetivos/stop20% y monitores de salidas. Estado de
+carga en CURRENT_CONTEXT; hasta validarla no afirmar activo ni todosloscasos
+resueltos. La evidenciaTSLA reciente no demuestra fallo de regla matematica.
+
+Actualizacion06/11/2026: usuario confirma "Si, descartar esa vela" ante la pregunta
+de si debe excluirse una vela que YA empieza fuera de Bollinger. Version nueva
+v6_apertura_dentro_bandas_iniciales: apertura oficial dentro de bandas calculadas
+con19cierres anteriores y esa apertura; una ampliacion posterior no la habilita.
+Sustituye la interpretacion dinamica26/10 conservada abajo como historia. Mantiene
+3% por cada banda, precio fuera/direccion/media, apertura tambien dentro de bandas
+actuales, sin veto del cierre previo ni espera de cierre. Estado de carga efectiva
+en CURRENT_CONTEXT. Detalle STRATEGY_ORIGIN_REVIEW_2026-11-06.md.
+
+Actualización05/11/2026, recuperación de salidas: un rechazo sin fills no debe
+anular silenciosamente el stop. Solo se autoriza una nueva venta acotada tras
+verificar posiciones y órdenes actuales de Schwab, cantidad propia exacta y
+ausencia de salida activa. Reserva y prueba quedan vinculadas; nunca repetir
+un envío incierto ni crear un bucle de rechazos. Stop20% persistente y avisos
+de fallos de salida separados. Detalle REAL_EXIT_RECOVERY_2026-11-05.md; carga
+efectiva y estado de cola en CURRENT_CONTEXT. No añade STOP/OCO nativo.
+
+Actualización05/11/2026: regla general REAL para todas las compañías. La compra
+válida tiene prioridad y no espera Telegram. El aviso de compra confirmada se
+emite después de verificar los fills de Schwab, en su hilo independiente. La
+venta por ganancia conserva el porcentaje de esa fila al activar la preparación,
+calculado sobre el costo medio efectivamente ejecutado; no sustituirlo por10%
+fijo ni por un objetivo de otra compañía. Tras compra final y preview exacto se
+coloca la LIMIT DAY en Schwab, redondeada hacia arriba cuando corresponda. Las
+ediciones de preparaciones posteriores no cambian posiciones ya abiertas.
+Se conserva stop20% y pausa/exclusión después de primera entrada. Una selección
+MANUAL explícita conserva su significado. Recuperación de acuses y estado de
+carga: REAL_ACK_RECOVERY_2026-11-05.md y CURRENT_CONTEXT.
+
 Actualización04/11/2026, controles de la cola REAL: el usuario autoriza que
 «Activar preparación» guarde y arme las compañías seleccionadas en una sola
 acción explícita. Cola real conserva quitar una pendiente, Pausar/Activar la
@@ -283,3 +332,26 @@ antesHTTP; primer fill incluso parcial excluye las demas y no repite al cerrar.
 Solo rechazo/cancelacion terminal sin fills o prueba de ningun envio permite
 seguir buscando; incertidumbre conserva reserva. Nueva cola solo por accion
 explicita, no rollover automatico. Simulacion conserva sus reglas anteriores.
+
+Actualizacion09/11/2026: lectura SMA de direccion y recorrido incorporada a
+REAL/Estadoestrategia y tarjetasSIM. Mismas20/40/100/200HoraDiario ymetodologia
+previa; fecha/preciooriginal yfaltantes visibles. Resumen de orden/pendiente,
+conflictos y siguientes medias/roles/distancias es descriptivo. No convierte
+medias en aprobacion/veto, prediccion de precio o targetautomatico; conserva
+entrada independiente, reglaBollinger, objetivosseleccionados ystop20%. Noesperar
+calculo de medias para enviar compra o aviso. Detalle BOLLINGER_MA_CONTEXT.md.
+
+## Indicador paralelo de fuerza - 11/11/2026
+
+Se incorpora observacion descriptiva de velocidad/aceleracion, continuidad,
+expansion y volumen relativo. Las clasificaciones son experimentales, con
+faltantes explicitos; no son requisito de entrada ni mueven objetivo/stop.
+Observador propio y archivo independiente; sin llamadas al broker o Telegram
+ni escrituras en la base de mercado. REAL y SIM muestran lecturas originales.
+Detalle: [fuerza observada](MOVEMENT_STRENGTH_2026-11-11.md). Estado comprobado,
+limitaciones y despliegue en CURRENT_CONTEXT, no inferir operatividad de esta nota.
+
+Aviso actualizado 11/11/2026: el mismo mensaje añade ancho actual de Bollinger
+y ritmo observado, sin filtros, espera o consultas adicionales. No confundir
+ancho porcentual actual con expansión del 3% de cada borde. Datos insuficientes
+se indican explícitamente. [Definiciones](BOLLINGER_NOTICE_BANDWIDTH.md).

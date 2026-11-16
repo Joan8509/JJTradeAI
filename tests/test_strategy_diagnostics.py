@@ -82,7 +82,8 @@ def diagnostic_page():
     from tests.test_strategy_diagnostics import snapshot,NOW
     from unittest.mock import patch
     from strategy_diagnostics_panel import render_strategy_diagnostics
-    with patch('strategy_diagnostics.read_snapshot',return_value=snapshot()) as reader:
+    with patch('strategy_diagnostics.read_snapshot',return_value=snapshot()) as reader, \
+         patch('ma_outlook_panel.read_outlooks',return_value={'available':True,'events':[]}):
         render_strategy_diagnostics(['QQQ'],now=NOW)
         import streamlit as st
         st.session_state['diagnostic_reads']=reader.call_count

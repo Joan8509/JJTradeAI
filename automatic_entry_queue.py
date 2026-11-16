@@ -495,6 +495,11 @@ class QueueRunner:
                 raise ExecutionBlocked('SIGNAL_WINDOW_UNAVAILABLE') from None
             self.first_signal_sources[signal['key']]=first
         deadline=signal_entry_deadline(first,now)
+        from bollinger_breakout_clock import breakout_deadline
+        cross_deadline=breakout_deadline(tick['signal'],now)
+        if cross_deadline is not None:
+            deadline=min(deadline,cross_deadline)
+            first=min(first,datetime.fromisoformat(tick['signal']['first_breakout_at']))
         result=dict(signal,first_signal_at=first.isoformat(),signal_deadline=deadline.isoformat())
         try:
             from entry_band_comparison import compare_snapshot

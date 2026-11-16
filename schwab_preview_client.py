@@ -22,12 +22,13 @@ def wire_payload(draft,account_number,as_of,wire_format):
 class SchwabPreviewClient:
     def __init__(self,context,*,opener=None,utcnow=lambda:datetime.now(timezone.utc),
                  clock=time.monotonic,sleeper=time.sleep,response_observer=None,error_observer=None,
-                 wire_format='PREVIEW_ORDER_STRATEGY_V1'):
+                 wire_format='PREVIEW_ORDER_STRATEGY_V1',accepted_warning_codes=()):
         self._context=context;self._opener=opener;self._utcnow=utcnow
         self._clock=clock;self._sleep=sleeper;self._lock=Lock();self._next=0.
         self._response_observer=response_observer
         self._error_observer=error_observer
         self.wire_format=wire_format
+        self.accepted_warning_codes=tuple(accepted_warning_codes)
 
     def __repr__(self):return '<SchwabPreviewClient: preview only, no order submission>'
 
@@ -51,7 +52,9 @@ class SchwabPreviewClient:
         if not isinstance(token,str) or not 1<=len(token)<=16384 or any(not 33<=ord(c)<=126 for c in token):
             raise SchwabError('PREVIEW_AUTHORIZATION_UNAVAILABLE')
         with self._lock:
-            self._sleep(max(0.,self._next-self._clock()));self._next=self._clock()+1.
+            delay=max(0.,self._next-self._clock())
+            if delay>0:self._sleep(delay)
+            self._next=self._clock()+1.
         payload=wire_payload(draft,context.account_number,self._utcnow(),self.wire_format)
         path='/trader/v1/accounts/'+context.account_hash+'/previewOrder'
         request=Request(API+path,data=json.dumps(payload,separators=(',',':')).encode(),method='POST',
@@ -65,7 +68,8 @@ class SchwabPreviewClient:
                 decoded=json.loads(raw)
                 if self._response_observer is not None:self._response_observer(decoded)
                 report=normalize_preview_response(decoded,draft,expected_account=context.account_number,
-                    as_of=self._utcnow(),optional_empty_categories=self.wire_format=='ORDER_REQUEST_V1')
+                    as_of=self._utcnow(),optional_empty_categories=self.wire_format=='ORDER_REQUEST_V1',
+                    accepted_warning_codes=self.accepted_warning_codes)
                 report['source']='SCHWAB_PREVIEW_ENDPOINT'
                 report['request_fingerprint']=sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
                 report['request_wire_format']=self.wire_format

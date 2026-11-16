@@ -83,6 +83,7 @@ class ExtendedGeometryTests(unittest.TestCase):
                      open=p, high=p, low=p, close=p, volume=100)
                 for i, p in enumerate(self.prior) for m in range(15)]
         self.store.upsert_frame(pd.DataFrame(rows), symbol='AAPL', provider='ALPACA', feed='iex')
+        TickRepository(self.db)
         self.now = OPEN+timedelta(seconds=1)
         self.geometry = TickGeometry(self.db, 'iex', now=lambda: self.now, reference_scope=EXTENDED)
         self.geometry.status('CONECTADO', OPEN-timedelta(seconds=1))

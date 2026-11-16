@@ -21,6 +21,7 @@ from real_live_capital import RealCapitalGuard
 from real_live_opportunities import RealOpportunities
 from schwab_preview_client import SchwabPreviewClient
 from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT
+from bollinger_phone_worker import STRATEGY_VERSION
 
 
 class RealDiagnosticStore(EncryptedSchwabStore):
@@ -31,6 +32,8 @@ class RealDiagnosticStore(EncryptedSchwabStore):
 def owner_real_market_data():
     from manual_trade_service import owner_market_data
     market=owner_market_data()
+    market.entry_quote_batches=True
+    market.background_yield=True
     # Same encrypted market vault; native SID and bounded locks only in REAL.
     market.client.oauth.store=EncryptedSchwabStore()
     return market
@@ -77,7 +80,19 @@ class RealExecutionHost:
         if self.entry_provider is not None:
             value['entry_preparation_timing']=self.entry_provider.timing_status()
             value['entry_attempts']=self.entry_provider.attempt_status()
+        if self.entry_provider is not None and self.entry_provider.evidence_recorder is not None:
+            value['option_evidence']=self.entry_provider.evidence_recorder.status()
+        value['entry_state_reader_revision']=getattr(getattr(getattr(self.entry_provider,'reader',None),'read_state',None),'revision',0)
+        value['entry_funding_selection_revision']=1
         value['entry_attempt_diagnostics_revision']=1
+        value['entry_quote_batch_revision']=1 if self.market is not None and self.market.entry_quote_batches is True else 0
+        value['entry_background_yield_revision']=1 if self.market is not None and self.market.background_yield is True else 0
+        value['submission_receipt_recovery_revision']=1
+        value['exit_recovery_revision']=1
+        value['strategy_version']=STRATEGY_VERSION
+        value['initial_opening_required_revision']=1
+        value['breakout_clock_revision']=1
+        value['market_wakeup_revision']=1
         if self.worker:
             observations=getattr(self.worker.execution,'exit_observations',None)
             if isinstance(observations,dict):value['exit_observations']=dict(observations)
@@ -134,16 +149,22 @@ class RealExecutionHost:
         market=owner_real_market_data()
         proof=config.get('protocol') or {}
         wire=proof.get('wire','PREVIEW_ORDER_STRATEGY_V1')
-        guard=RealCapitalGuard(context,client,SchwabPreviewClient(context,wire_format=wire),self.ledger,clock=self.clock)
+        from real_preview_warning_policy import accepted_warning_codes
+        guard=RealCapitalGuard(context,client,SchwabPreviewClient(context,wire_format=wire,
+            accepted_warning_codes=accepted_warning_codes(config,context.binding,now=aware(self.clock()))),self.ledger,clock=self.clock)
         guard.preview.prepare_transport()
-        provider=RealOpportunities(market,guard,clock=self.clock)
+        from option_evidence_recorder import OptionEvidenceRecorder
+        evidence=OptionEvidenceRecorder(clock=self.clock);evidence.start()
+        provider=RealOpportunities(market,guard,clock=self.clock,evidence_recorder=evidence)
         self.entry_provider=provider
+        from real_submission_receipts import RealSubmissionReceipts
         execution=connect_live_execution(context,quote_contract=provider.quote_contract,
             entry_ready=lambda:not self.deployment_hold and self._market_authorization_current() and guard.entry_ready(),
             signal_current=provider.signal_current,entry_admission=guard.permits,ledger=self.ledger,clock=self.clock,
             exit_session_provider=__import__('real_live_control').next_official_session,entry_quote_provider=provider.entry_contract,
-            entry_cost=guard.estimated_cost)
+            entry_cost=guard.estimated_cost,submission_receipts=RealSubmissionReceipts())
         execution.exit_admission=guard.exit_permitted
+        execution.exit_retry_proof=guard.rejected_exit_retry_proof
         execution.coordinator.gateway.prepare_transport()
         self.binding=context.binding;self.context=context;self.capital=guard;self.market=market
         self.protocol=(proof.get('binding')==self.binding and proof.get('source')=='SCHWAB_PREVIEW_ENDPOINT'
@@ -167,12 +188,19 @@ class RealExecutionHost:
                 raise
         from real_live_commands import CommandExecution
         from real_entry_preparation import RealEntryPreparation
-        preparation=RealEntryPreparation(self.queue,self.binding,market,clock=self.clock)
+        preparation=RealEntryPreparation(self.queue,self.binding,market,clock=self.clock,
+            authorization_current=lambda:not self.deployment_hold and self._market_authorization_current())
         from real_trade_notices import RealTradeNotices
         notices=RealTradeNotices(self.binding,self.ledger,clock=self.clock)
         notices.initialize()
+        notices.exit_status_provider=lambda:dict(execution.exit_observations)
+        from market_signal_wakeup import SignalWakeup
+        from market_store import DEFAULT_MARKET_DATABASE
+        from real_entry_signal_hints import entry_signal_symbols
         self.worker=RealExecutionWorker(self.queue,CommandExecution(execution),entry,preparation=preparation,
-            separate_observation=True,notices=notices)
+            separate_observation=True,notices=notices,
+            signal_wakeup=SignalWakeup(DEFAULT_MARKET_DATABASE,'real'),
+            signal_symbols=lambda symbols:entry_signal_symbols(DEFAULT_MARKET_DATABASE,symbols))
         from real_broker_target import BrokerProfitTargets
         target_preview=SchwabPreviewClient(context,wire_format=wire)
         target_preview.prepare_transport()
@@ -261,18 +289,22 @@ class RealExecutionHost:
             # refuses to abandon an existing execution instance in this process.
             self._status(['LIVE_HOST_ACCOUNT_RESTART_REQUIRED']);return
         if self.worker is None:self._connect(config)
+        from real_preview_warning_policy import accepted_warning_codes
+        self.capital.preview.accepted_warning_codes=accepted_warning_codes(config,self.binding,now=aware(self.clock()))
         if (time.monotonic()-self._last_market_auth>=15 and
             (self._market_auth_thread is None or not self._market_auth_thread.is_alive())):
             self._last_market_auth=time.monotonic()
             self._market_auth_thread=Thread(target=self._refresh_market_authorization,
                 name='JJTrade-real-option-authorization',daemon=True)
             self._market_auth_thread.start()
-        if (time.monotonic()-self.last_refresh>=15 and
+        if ((time.monotonic()-self.last_refresh>=15 or
+                (self.capital.exit_refresh_requested is True and time.monotonic()-self.last_refresh>=2)) and
             (self._refresh_thread is None or not self._refresh_thread.is_alive())):
             # Balance/order GETs may each wait for a broker timeout. They must
             # not prevent fresh worker/status publication. One refresh at most;
             # admission still requires the guard's actual current evidence.
             self.last_refresh=time.monotonic()
+            self.capital.exit_refresh_requested=False
             self._refresh_thread=Thread(target=self.capital.refresh,name='JJTrade-real-account',daemon=True)
             self._refresh_thread.start()
         if not self.capital.account_ready():blockers.append(self.capital.blocker or 'LIVE_ACCOUNT_NOT_CURRENT')
@@ -294,6 +326,10 @@ def main():
         handle.seek(0);handle.write(b'0');handle.flush();handle.seek(0)
         try:msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
         except OSError:return 0
+        # Scheduled tasks can inherit background CPU/memory priority. Match
+        # the collector/radar policy before starting time-sensitive monitors.
+        from process_scheduling import normalize_service_priority
+        normalize_service_priority()
         host=RealExecutionHost()
         while True:
             try:host.tick()

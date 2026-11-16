@@ -60,7 +60,7 @@ class SchwabTransport:
             opener = build_opener(_NoRedirect(), HTTPSHandler(context=context))
         self.opener = opener
 
-    def request(self, method, path, *, headers=None, params=None, form=None):
+    def request(self, method, path, *, headers=None, params=None, form=None,background=False):
         if not isinstance(path, str) or any(c in path for c in ('?', '#', '\\', '..', '\r', '\n')):
             raise SchwabError('RESOURCE_NOT_ALLOWED')
         allowed = (method == 'POST' and path == '/v1/oauth/token') or (
@@ -69,9 +69,20 @@ class SchwabTransport:
                 r'/trader/v1/accounts/[A-Za-z0-9_-]+(?:/orders(?:/[0-9]+)?)?', path)))
         if not allowed or (method == 'GET' and form is not None):
             raise SchwabError('RESOURCE_NOT_ALLOWED')
-        with self.lock:
-            self.sleeper(max(0.0, self.next_request-self.clock()))
+        if background and (method,path)!=('GET','/marketdata/v1/chains'):
+            raise SchwabError('RESOURCE_NOT_ALLOWED')
+        # Metadata preparation never joins the live price request queue or
+        # reserves a future slot. Preserve spacing/Retry-After for every caller.
+        if not self.lock.acquire(blocking=not background):
+            raise SchwabError('BACKGROUND_REQUEST_DEFERRED')
+        try:
+            if background:
+                if self.clock()<self.next_request:raise SchwabError('BACKGROUND_REQUEST_DEFERRED')
+            else:
+                delay=max(0.0,self.next_request-self.clock())
+                if delay>0:self.sleeper(delay)
             self.next_request = self.clock()+self.interval
+        finally:self.lock.release()
         # Share request-start spacing and Retry-After, not the HTTP wait.
         # A background chain response must not hold up live entry/exit quotes.
         request = Request(API+path+('?' + urlencode(params) if params else ''),
@@ -158,6 +169,9 @@ class EncryptedSchwabStore:
             output.flush()
             import os
             os.fsync(output.fileno())
+        self._replace_file(temporary)
+
+    def _replace_file(self,temporary):
         temporary.replace(self.path)
 
     def locked(self):
@@ -265,9 +279,10 @@ class SchwabReadOnlyClient:
         self.oauth = oauth
         self.transport = transport or oauth.transport
 
-    def _get(self, path, now, **params):
+    def _get(self, path, now, *, background=False,**params):
         return self.transport.request('GET', path, headers={
-            'Authorization': 'Bearer '+self.oauth.access(now), 'Accept': 'application/json'}, params=params)
+            'Authorization': 'Bearer '+self.oauth.access(now), 'Accept': 'application/json'}, params=params,
+            **({'background':True} if background else {}))
 
     def accounts(self, now):
         return self._get('/trader/v1/accounts/accountNumbers', now)
@@ -306,11 +321,11 @@ class SchwabReadOnlyClient:
             raise ValueError('Invalid quote request')
         return self._get('/marketdata/v1/quotes', now, symbols=','.join(symbols))
 
-    def full_chain(self, symbol, side, now):
+    def full_chain(self, symbol, side, now,*,background=False):
         """Unbounded listed expirations for selection; never infer from a short window."""
         if side not in ('CALL', 'PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}', symbol):
             raise ValueError('Invalid contract search')
-        return self._get('/marketdata/v1/chains', now, symbol=symbol, contractType=side,
+        return self._get('/marketdata/v1/chains', now,background=background,symbol=symbol, contractType=side,
             strategy='SINGLE', range='ALL', includeUnderlyingQuote='true')
 
 

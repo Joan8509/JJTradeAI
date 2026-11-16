@@ -5,7 +5,7 @@ from decimal import Decimal
 
 ENTRY_LIFETIME_SECONDS = 10
 SIGNAL_ENTRY_WINDOW_SECONDS = 30
-SIGNAL_WINDOW_REVISION = 'durable_first_signal_30s_v1'
+SIGNAL_WINDOW_REVISION = 'first_breakout_and_first_signal_30s_v2'
 
 
 def signal_entry_deadline(first_source_at, now):

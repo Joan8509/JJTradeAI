@@ -1,21 +1,21 @@
-"""Opening is official/fixed, membership uses bands available at detection."""
+"""V6 rejects candles outside initially even if later bands engulf opening."""
 from unittest import TestCase
 from bollinger_phone_worker import detect_values, EVENT_KEY_VERSION, STRATEGY_VERSION
 
 
 class DynamicOpeningTests(TestCase):
-    def test_nvda_case_enters_when_current_bands_contain_genuine_opening(self):
+    def test_nvda_case_is_rejected_when_only_later_bands_contain_opening(self):
         args=(212.1,212.78602646538326,211.09747353461677,211.94175,
               213.62,213.05767144903348,210.91582855096647,211.98675)
-        self.assertEqual(detect_values(*args,opening=213.055,
-            opening_upper=212.87414785807647,opening_lower=211.04285214192356),'SUPERIOR')
+        self.assertIsNone(detect_values(*args,opening=213.055,
+            opening_upper=212.87414785807647,opening_lower=211.04285214192356))
         self.assertIsNone(detect_values(*args,opening=213.06))
 
-    def test_put_and_call_use_current_bands_without_old_band_veto(self):
-        self.assertEqual(detect_values(100,102,98,100,104,103,97,100.5,
-            opening=102.5,opening_upper=102,opening_lower=98),'SUPERIOR')
-        self.assertEqual(detect_values(100,102,98,100,96,103,97,99.5,
-            opening=97.5,opening_upper=102,opening_lower=98),'INFERIOR')
+    def test_put_and_call_reject_openings_outside_initial_bands(self):
+        self.assertIsNone(detect_values(100,102,98,100,104,103,97,100.5,
+            opening=102.5,opening_upper=102,opening_lower=98))
+        self.assertIsNone(detect_values(100,102,98,100,96,103,97,99.5,
+            opening=97.5,opening_upper=102,opening_lower=98))
 
     def test_inside_current_bands_is_still_mandatory_not_just_direction(self):
         for opening in (103.001,96.999,None,float('nan')):

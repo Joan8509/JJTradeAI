@@ -95,7 +95,7 @@ class DurableWalTests(unittest.TestCase):
             database=Path(temp)/'source.db';seed(database)
             with closing(sqlite3.connect(database)) as db:db.execute('PRAGMA journal_mode=WAL')
             worker=RealtimeBollingerWorker(database,'iex',['AAPL'])
-            def observe(message,received):
+            def observe(message,received,**kwargs):
                 return dict(symbol='AAPL',source_timestamp=message['t'],received_at=received.isoformat(),signal=dict(side='SUPERIOR',candle=CANDLE.isoformat()) if message['i']==1 else None),'READY_NO_EXIT'
             try:
                 with closing(sqlite3.connect(database)) as reader,patch.object(worker.geometry,'observe',side_effect=observe):

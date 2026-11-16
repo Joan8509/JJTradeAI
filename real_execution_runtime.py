@@ -16,7 +16,8 @@ from schwab_order_gateway import SchwabOrderGateway
 
 def connect_live_execution(context, *, quote_contract, entry_ready, signal_current,
                            ledger=None, clock=lambda:datetime.now(timezone.utc), gateway_factory=SchwabOrderGateway,
-                           entry_admission=None,exit_session_provider=None,entry_quote_provider=None,entry_cost=None):
+                           entry_admission=None,exit_session_provider=None,entry_quote_provider=None,entry_cost=None,
+                           submission_receipts=None):
     """Wire only this explicit private account; construction never sends an order."""
     ledger=ledger if ledger is not None else RealOrderLedger(clock=clock)
     reader=SchwabReadOnlyClient(context.oauth)
@@ -41,7 +42,7 @@ def connect_live_execution(context, *, quote_contract, entry_ready, signal_curre
                 and service.entry_admission(service.draft_for(row)) is True)
         return row.get('parent_id') is not None
 
-    service.coordinator=RealOrderCoordinator(ledger,gateway,grant)
+    service.coordinator=RealOrderCoordinator(ledger,gateway,grant,receipts=submission_receipts)
     return service
 
 
@@ -52,13 +53,17 @@ class RealExecutionWorker:
     is not a supervisor. This class does not install or change Windows tasks.
     """
     def __init__(self,queue,execution,prepare_entry,*,monotonic=time.monotonic,preparation=None,
-                 separate_observation=False,notices=None):
+                 separate_observation=False,notices=None,signal_wakeup=None,signal_symbols=None):
         self.queue=queue;self.execution=execution;self.prepare_entry=prepare_entry
-        self._clock=monotonic;self._stop=Event();self._wake=Event();self._mutex=Lock()
+        self._clock=monotonic;self._stop=Event();self._wake=signal_wakeup if signal_wakeup is not None else Event();self._mutex=Lock()
+        self._order_wake=Event();self._target_wake=Event();self._notice_wake=Event()
+        coordinator=getattr(execution,'coordinator',None)
+        if coordinator is not None:coordinator.submission_observer=self._order_wake.set
         self._threads=[];self._heartbeat={};self._last_errors={};self._turn_seconds={}
         self.preparation=preparation
         self.separate_observation=separate_observation;self.notices=notices
         self.targets=None
+        self.signal_symbols=signal_symbols
         self.external_closes=None
 
     def start(self):
@@ -84,17 +89,22 @@ class RealExecutionWorker:
             try:
                 if role=='exits':
                     events=self.execution.monitor_positions() if self.separate_observation else self.execution.poll()
-                    if any(r.get('state') in ('LIVE_ORDER_READ_UNAVAILABLE','LIVE_EXIT_REQUIRES_REVIEW') for r in events):
+                    if any(r.get('state') in ('LIVE_ORDER_READ_UNAVAILABLE','LIVE_EXIT_REQUIRES_REVIEW')
+                            or 'ORDER_HTTP_NOT_ATTEMPTED' in r.get('issues',[]) for r in events):
                         error='LIVE_MONITOR_REQUIRES_REVIEW'
                 elif role=='orders':
                     events=self.execution.observe_orders()
                     if any(r.get('state')=='LIVE_ORDER_READ_UNAVAILABLE' for r in events):error='LIVE_ORDER_MONITOR_REQUIRES_REVIEW'
+                    if any(r.get('fills') for r in events):
+                        self._target_wake.set();self._notice_wake.set()
                 elif role=='notices':self.notices.step()
                 elif role=='targets':self.targets.step()
                 elif role=='external_closes':self.external_closes.step()
                 elif role=='preparation':self.preparation.step()
                 else:
-                    self.queue.step(self.execution.binding,self.execution,self.prepare_entry,monitor=False)
+                    kwargs=dict(monitor=False)
+                    if self.signal_symbols is not None:kwargs['signal_symbols']=self.signal_symbols
+                    self.queue.step(self.execution.binding,self.execution,self.prepare_entry,**kwargs)
             except Exception:
                 error=('LIVE_MONITOR_REQUIRES_REVIEW' if role=='exits' else
                     'LIVE_ORDER_MONITOR_REQUIRES_REVIEW' if role=='orders' else
@@ -106,13 +116,18 @@ class RealExecutionWorker:
                 self._heartbeat[role]=self._clock();self._last_errors[role]=error
                 self._turn_seconds[role]=self._heartbeat[role]-started
             if role=='entries':
-                self._wake.wait(interval);self._wake.clear()
+                self._wake.wait(max(0.,interval-(self._clock()-started)));self._wake.clear()
+            elif role in ('orders','targets','notices'):
+                event={'orders':self._order_wake,'targets':self._target_wake,'notices':self._notice_wake}[role]
+                event.wait(max(0.,interval-(self._clock()-started)));event.clear()
             else:self._stop.wait(max(0.,interval-(self._clock()-started)))
 
     def status(self):
         with self._mutex:
             now=self._clock()
             return dict(started=bool(self._threads),
+                market_wakeup_revision=1,market_wakeup_native=bool(getattr(self._wake,'native',False)),
+                entry_signal_hints_revision=1 if self.signal_symbols is not None else 0,
                 external_closes_current=bool(self.external_closes is None or (not self._stop.is_set() and
                     'external_closes' in self._heartbeat and now-self._heartbeat['external_closes']<5 and
                     self._last_errors.get('external_closes') is None)),
@@ -133,7 +148,10 @@ class RealExecutionWorker:
     def shutdown(self):
         """Host shutdown only; pausing entries uses queue.pause instead."""
         self._stop.set();self._wake.set()
+        self._order_wake.set();self._target_wake.set();self._notice_wake.set()
         for thread in self._threads:thread.join(timeout=.25)
+        close=getattr(self._wake,'close',None)
+        if callable(close) and not any(t.is_alive() and t.name.endswith('-entries') for t in self._threads):close()
 
 
 class RealLiveRuntime:

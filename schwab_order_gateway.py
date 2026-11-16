@@ -88,7 +88,8 @@ class SchwabOrderGateway:
         self.prepare_transport()
         token=self._token()
         with self._lock:
-            self._sleep(max(0.,self._next_request-self._clock()))
+            delay=max(0.,self._next_request-self._clock())
+            if delay>0:self._sleep(delay)
             self._next_request=self._clock()+1.
         self._admit(row,action)  # State/readiness can change during OAuth/backoff.
         path='/trader/v1/accounts/'+self._account+'/orders'

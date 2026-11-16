@@ -31,11 +31,14 @@ class RealExecutionService:
         self._drafts={}
         self._entry_signals={}
         self._target_permits={}
+        self._exit_retry_permits={}
+        self._exit_retry_after={}
         self.entry_admission=entry_admission or (lambda draft:True)
         self.exit_session_provider=exit_session_provider
         self.entry_quote_provider=entry_quote_provider
         self.entry_cost=entry_cost or (lambda draft:None)
         self.exit_admission=lambda contract:True
+        self.exit_retry_proof=lambda parent,rejected,quantity:None
         self.exit_observations={}
 
     def __repr__(self):return '<RealExecutionService: explicit dependencies, durable orders>'
@@ -61,6 +64,17 @@ class RealExecutionService:
                 and self.entry_admission(self.draft_for(row)) is True)
         parent=next((r for r in self.ledger.requests(self.binding) if r['id']==row.get('parent_id')),None)
         if parent and parent.get('external_close_hold'):return False
+        if row.get('exit_recovery_proof') is not None:
+            from real_exit_recovery import validate_retry_proof
+            proof=row['exit_recovery_proof']
+            if (not parent or proof!=self._exit_retry_permits.get(row['id'])
+                    or parent.get('exit_recovery_request')!=row['id']):return False
+            rejected=[r for r in self.ledger.requests(self.binding) if r.get('parent_id')==parent['id']
+                and r['id'] in proof['rejected_ids'] and r['state']=='REJECTED']
+            try:
+                validate_retry_proof(proof,binding=self.binding,parent=dict(parent,exit_recovery_used=False),
+                    rejected=rejected,quantity=row['quantity'],now=self.clock())
+            except RealOrderBlocked:return False
         if row.get('exit_role')=='BROKER_TARGET':
             if row.get('price_proof')!=self._target_permits.get(row['id']):return False
             parent=next((r for r in self.ledger.requests(self.binding) if r['id']==row.get('parent_id')),None)
@@ -146,6 +160,10 @@ class RealExecutionService:
         """Account GET/cancel observation never holds the price-monitor lock."""
         with self._order_observation_lock:
             results=[]
+            try:
+                self.coordinator.recover_receipts(self.binding)
+            except Exception:
+                results.append(dict(state='LIVE_ORDER_READ_UNAVAILABLE',code='ORDER_RECEIPT_RECOVERY_PENDING'))
             for row in self.ledger.requests(self.binding):
                 if not row.get('broker_id') or row['state'] in TERMINAL:continue
                 try:
@@ -182,7 +200,7 @@ class RealExecutionService:
                         if not re.fullmatch('[A-Z_]{1,100}',code):
                             code='LIVE_STORAGE_LOCK_UNAVAILABLE' if isinstance(error,PermissionError) else 'LIVE_EXIT_CHECK_FAILED'
                         self.exit_observations[row['contract']]=dict(self.exit_observations.get(row['contract'],{}),
-                            checked_at=aware(self.clock()).isoformat(),state=code)
+                            checked_at=aware(self.clock()).isoformat(),state=code,parent_id=row['id'])
                         results.append(dict(id=row['id'],state='LIVE_EXIT_REQUIRES_REVIEW',code=code))
             return results
 
@@ -197,14 +215,13 @@ class RealExecutionService:
         children=[r for r in rows if r.get('parent_id')==buy['id']]
         bought=sum(f['quantity'] for f in buy['fills'].values())
         sold=sum(f['quantity'] for r in children for f in r['fills'].values())
-        if sold>=bought:return None
+        if sold>=bought:
+            if self.exit_observations.get(buy['contract'],{}).get('parent_id')==buy['id']:
+                self.exit_observations.pop(buy['contract'],None)
+            return None
         if buy.get('external_close_hold'):
             self.exit_observations[buy['contract']]=dict(checked_at=now.isoformat(),state='EXTERNAL_MANUAL_CLOSE_DETECTED')
             return None
-        # A definitive rejection is not permission to create another sell.
-        # Reconcile the broker position/manual orders before any new attempt.
-        if any(r['state']=='REJECTED' for r in children):
-            raise RealOrderBlocked('LIVE_EXIT_REJECTION_REQUIRES_REVIEW')
         if self.exit_admission(buy['contract']) is not True:
             raise RealOrderBlocked('LIVE_EXTERNAL_CLOSE_REQUIRES_RECONCILIATION')
         contract=self.quote_contract(buy['contract']);contract.validate_identity()
@@ -218,12 +235,17 @@ class RealExecutionService:
         cost=sum(decimal(f['price'])*f['quantity'] for f in buy['fills'].values())/bought
         bid=decimal(quote.bid);reason=buy.get('exit_trigger')
         self.exit_observations[buy['contract']]=dict(checked_at=now.isoformat(),state='CURRENT',
+            parent_id=buy['id'],
             quote_at=stamp.isoformat(),bid=str(bid),entry_average=str(cost),
             target=plan['target'],stop=plan['stop'],stop_bid=str(cost*decimal('.8')),
             target_bid=None if plan['target']=='MANUAL' else str(cost*(1+decimal(plan['target'])/100)))
         if bid<=cost*decimal('.8'):reason='STOP'
         elif not reason and plan['target']!='MANUAL' and bid>=cost*(1+decimal(plan['target'])/100):reason='TARGET'
-        if not reason:return None
+        from real_exit_recovery import unresolved_rejections
+        rejected=unresolved_rejections(buy,children)
+        if not reason:
+            if rejected:raise RealOrderBlocked('LIVE_EXIT_REJECTION_REQUIRES_REVIEW')
+            return None
         self.exit_observations[buy['contract']].update(state='EXIT_TRIGGERED',reason=reason)
         if reason!=buy.get('exit_trigger'):buy=self.ledger.trigger_exit(self.binding,buy['id'],reason)
         if buy['state'] in ('ACKNOWLEDGED','WORKING','PARTIALLY_FILLED'):
@@ -245,6 +267,13 @@ class RealExecutionService:
             return None
         quantity=min(bought-sold,self.ledger.available_to_close(self.binding,buy['contract']))
         if quantity<=0:return None
+        if now<self._exit_retry_after.get(buy['id'],now):
+            self.exit_observations[buy['contract']].update(state='LIVE_EXIT_NOT_DISPATCHED')
+            return dict(id=buy['id'],state='LIVE_EXIT_REQUIRES_REVIEW',code='LIVE_EXIT_NOT_DISPATCHED')
+        retry_proof=None
+        if rejected:
+            retry_proof=self.exit_retry_proof(buy,rejected,quantity)
+            if retry_proof is None:raise RealOrderBlocked('LIVE_EXIT_REJECTION_REQUIRES_REVIEW')
         until=min(stamp+timedelta(seconds=30),aware(end))
         if contract.price_increment is None:
             if reason=='TARGET' and bid<cost*(1+decimal(plan['target'])/100):return None
@@ -254,10 +283,15 @@ class RealExecutionService:
             draft=prepare_option_limit(contract,instruction='SELL_TO_CLOSE',quantity=quantity,now=now,valid_until=until,close_limit=limit)
         row=self.ledger.prepare(self.binding,intent=buy['id']+':EXIT:'+str(len(children)),
             contract=draft.contract,instruction=draft.instruction,quantity=quantity,limit=draft.limit,
-            price_increment=contract.price_increment,expires_at=draft.expires_at,parent_id=buy['id'],price_validation=draft.price_validation)
+            price_increment=contract.price_increment,expires_at=draft.expires_at,parent_id=buy['id'],price_validation=draft.price_validation,
+            exit_retry_proof=retry_proof)
         self._drafts[row['id']]=draft
+        if retry_proof is not None:self._exit_retry_permits[row['id']]=dict(retry_proof)
         result=self.coordinator.submit(self.binding,row['id'])
         self.exit_observations[buy['contract']].update(state='EXIT_ORDER_'+result['state'],limit=result['limit'])
+        if result['state']=='EXPIRED' and 'ORDER_HTTP_NOT_ATTEMPTED' in result.get('issues',[]):
+            self.exit_observations[buy['contract']].update(state='LIVE_EXIT_NOT_DISPATCHED')
+            self._exit_retry_after[buy['id']]=aware(self.clock())+timedelta(seconds=1)
         return result
 
     def close_manually(self,buy_id):

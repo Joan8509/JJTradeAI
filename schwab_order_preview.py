@@ -58,7 +58,7 @@ def _costs(raw):
     return result
 
 
-def normalize_preview_response(payload,draft,*,expected_account,as_of,optional_empty_categories=False):
+def normalize_preview_response(payload,draft,*,expected_account,as_of,optional_empty_categories=False,accepted_warning_codes=()):
     """Match account/contract/quantity/limit; report validation without a grant.
 
     Unknown/missing rule categories fail closed. Even ACCEPT_REPORTED does not
@@ -105,7 +105,7 @@ def normalize_preview_response(payload,draft,*,expected_account,as_of,optional_e
             raise ValueError
         # Preview is unsubmitted: zero/omitted remaining quantity is not exposure.
         # Real GET-order reconciliation retains its separate strict quantity checks.
-        rules=payload['orderValidationResult'];counts={};blocked=[]
+        rules=payload['orderValidationResult'];counts={};blocked=[];accepted_warnings=[]
         if not isinstance(rules,dict):raise ValueError
         if set(rules)-{'alerts','accepts','rejects','reviews','warns'}:
             blocked.append('UNKNOWN_VALIDATION_CATEGORY')
@@ -113,7 +113,18 @@ def normalize_preview_response(payload,draft,*,expected_account,as_of,optional_e
             rows=rules.get(category,[]) if optional_empty_categories else rules[category]
             if not isinstance(rows,list) or any(not isinstance(r,dict) for r in rows):raise ValueError
             counts[category]=len(rows)
-            if category!='accepts' and rows:blocked.append(category.upper()+'_REPORTED')
+            if category!='accepts' and rows:
+                remaining=rows
+                if category=='warns' and draft.instruction=='BUY_TO_OPEN' and 'SEV25' in accepted_warning_codes:
+                    def accepted_sev25(row):
+                        message=row.get('activityMessage')
+                        return (row.get('originalSeverity')=='WARN' and row.get('overrideSeverity') in (None,'WARN')
+                            and isinstance(message,str)
+                            and message.startswith('The underlying security of this option is currently considered Hard to Borrow.')
+                            and message.rstrip().endswith('[SEV25]'))
+                    remaining=[r for r in rows if not accepted_sev25(r)]
+                    if len(remaining)!=len(rows):accepted_warnings.append('SEV25')
+                if remaining:blocked.append(category.upper()+'_REPORTED')
             if category=='accepts' and any(r.get('originalSeverity')!='ACCEPT' or
                 r.get('overrideSeverity') not in (None,'ACCEPT') for r in rows):
                 blocked.append('UNKNOWN_ACCEPT_SEVERITY')
@@ -131,7 +142,7 @@ def normalize_preview_response(payload,draft,*,expected_account,as_of,optional_e
         state='PREVIEW_REQUIRES_REVIEW' if blocked else 'PREVIEW_ACCEPT_REPORTED' if counts['accepts'] else 'PREVIEW_NO_REJECTION_REPORTED'
         return dict(state=state,
             checked_at=now.isoformat(),draft_expires_at=aware(draft.expires_at).isoformat(),request_fingerprint=fingerprint,
-            validation_counts=counts,blockers=sorted(set(blocked)),reported_projection=projection,reported_costs=costs,
+            validation_counts=counts,blockers=sorted(set(blocked)),accepted_warning_codes=sorted(set(accepted_warnings)),reported_projection=projection,reported_costs=costs,
             estimated_premium=str(draft.limit*100*draft.quantity),total_cost=None,total_cost_verified=False,
             settled_cash_verified=False,options_permissions_verified=False,send_authorized=False,
             real_orders_enabled=False,orders_sent=0)

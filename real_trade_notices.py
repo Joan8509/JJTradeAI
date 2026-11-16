@@ -37,6 +37,16 @@ def format_execution(event,rows):
     symbol=match[1];side='CALL' if match[2]=='C' else 'PUT'
     stamp=aware(datetime.fromisoformat(event['at'])).astimezone(ZoneInfo('America/New_York')).strftime('%H:%M:%S ET')
     quantity=event['quantity'];size=str(quantity)+(' contrato' if quantity==1 else ' contratos')
+    if event.get('kind')=='ORDER_CONFIRMATION_PENDING':
+        return '\n'.join(('CONFIRMACIÓN REAL PENDIENTE · '+symbol+' '+side,
+            'La compra pudo ejecutarse; la app aún no confirma su seguimiento.',
+            stamp+' · Revisa inmediatamente posición y órdenes en Schwab.',
+            'Las otras entradas están bloqueadas. No se repetirá la compra.'))
+    if event.get('kind')=='EXIT_REVIEW':
+        return '\n'.join(('SALIDA REAL REQUIERE ATENCIÓN · '+symbol+' '+side,
+            'La venta aún no está confirmada; revisa posición y órdenes en Schwab.',
+            stamp+' · La app está comprobando la salida y las cantidades disponibles.',
+            'No se repetirá una orden cuyo envío o ejecución sean inciertos.'))
     if event.get('kind') in ('EXTERNAL_CLOSE_DETECTED','EXTERNAL_CLOSE_REVIEW'):
         review=event['kind']=='EXTERNAL_CLOSE_REVIEW'
         detail=('Revisa la posición y las órdenes en Schwab.' if review else
@@ -85,6 +95,7 @@ class RealTradeNotices:
         self.sender=sender or self._send;self._status=dict(state='NOT_INITIALIZED')
         self.target_status_provider=lambda:{}
         self.external_status_provider=lambda:{}
+        self.exit_status_provider=lambda:{}
 
     @staticmethod
     def _send(text):
@@ -125,16 +136,34 @@ class RealTradeNotices:
         now=aware(self.clock());attempted=0
         events=[event for row in rows if (event:=execution_event(self.binding,row)) is not None]
         for row in rows:
+            if (row['instruction']=='BUY_TO_OPEN' and row['state'] in ('SUBMITTING','UNCERTAIN')
+                    and not row.get('broker_id') and now-aware(datetime.fromisoformat(row['created_at']))>=timedelta(seconds=5)):
+                key=sha256((self.binding+'\0'+row['id']+'\0ORDER_CONFIRMATION_PENDING').encode()).hexdigest()
+                events.append(dict(kind='ORDER_CONFIRMATION_PENDING',key=key,request=row['id'],
+                    contract=row['contract'],quantity=row['quantity'],at=row['created_at']))
+        for row in rows:
             if row.get('exit_role')!='BROKER_TARGET' or row['state']!='WORKING' or row['fills']:continue
             parent=next((p for p in rows if p['id']==row.get('parent_id')),None)
             if not parent or parent.get('external_close_hold') or parent.get('exit_trigger') in ('STOP','MANUAL'):continue
             key=sha256((self.binding+'\0'+row['id']+'\0TARGET_REGISTERED').encode()).hexdigest()
             events.append(dict(kind='TARGET_REGISTERED',key=key,request=row['id'],contract=row['contract'],
                 quantity=row['quantity'],at=row['updated_at'],limit=row['limit'],target=parent['exit_plan']['target']))
+        for contract,status in dict(self.exit_status_provider()).items():
+            state=status.get('state','')
+            if not (state.startswith('LIVE_') or state in ('EXIT_ORDER_REJECTED','EXIT_ORDER_UNCERTAIN','EXIT_ORDER_SUBMITTING')):continue
+            parent=next((r for r in rows if r['id']==status.get('parent_id')),None)
+            if not parent:continue
+            if sum(f['quantity'] for f in parent['fills'].values())<=sum(f['quantity'] for r in rows
+                    if r.get('parent_id')==parent['id'] for f in r['fills'].values()):continue
+            key=sha256((self.binding+'\0'+parent['id']+'\0EXIT_REVIEW\0'+state).encode()).hexdigest()
+            events.append(dict(kind='EXIT_REVIEW',key=key,request=parent['id'],contract=contract,
+                quantity=sum(f['quantity'] for f in parent['fills'].values()),at=status['checked_at']))
         for contract,status in self.target_status_provider().items():
             if not status.get('error'):continue
             parent=next((r for r in rows if r['id']==status.get('parent_id')),None)
             if not parent:continue
+            if sum(f['quantity'] for f in parent['fills'].values())<=sum(f['quantity'] for r in rows
+                    if r.get('parent_id')==parent['id'] for f in r['fills'].values()):continue
             kind='TARGET_REVIEW' if status.get('review') else 'TARGET_PENDING'
             key=sha256((self.binding+'\0'+parent['id']+'\0'+kind).encode()).hexdigest()
             events.append(dict(kind=kind,key=key,request=parent['id'],contract=contract,

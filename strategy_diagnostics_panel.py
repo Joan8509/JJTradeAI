@@ -5,6 +5,8 @@ import json
 import streamlit as st
 
 STATUS = {
+    'BREAKOUT_CLOCK_UNAVAILABLE':'Primera ruptura sin verificar tras la reconexión',
+    'BREAKOUT_ENTRY_WINDOW_EXPIRED':'Ruptura vencida: más de 30 segundos desde la primera salida',
     'UNAVAILABLE':'Sin datos disponibles', 'INVALID_OR_INCOMPLETE':'Datos incompletos o inválidos',
     'VERSION_MISMATCH':'Versión del registro diferente', 'FEED_MISMATCH':'Fuentes diferentes',
     'OUTSIDE_SESSION':'Fuera de la sesión regular', 'COLLECTOR_NOT_CURRENT':'Conexión de mercado no reciente',
@@ -13,7 +15,7 @@ STATUS = {
     'DETECTOR_MISMATCH':'El registro y la geometría difieren',
     'GEOMETRY_MATCH':'La geometría coincide; revisar vigencia y requisitos de compra',
 }
-CHECKS = {'opening_inside':'apertura dentro', 'upper_expansion':'expansión superior',
+CHECKS = {'breakout_current':'ruptura dentro de 30 segundos', 'opening_inside':'apertura dentro', 'opening_inside_initial':'la vela debe empezar dentro', 'upper_expansion':'expansión superior',
           'lower_expansion':'expansión inferior', 'directional_exit':'salida direccional',
           'midpoint':'dirección de la media'}
 
@@ -29,6 +31,8 @@ def render_strategy_diagnostics(symbols, *, database=None, now=None):
     if st.button('Actualizar diagnóstico', key='strategy_diagnostic_refresh', disabled=not selected):
         clock = now or datetime.now(timezone.utc)
         st.session_state['strategy_diagnostic_snapshot'] = read_snapshot(database or DEFAULT_MARKET_DATABASE, selected, clock)
+        from ma_outlook_panel import read_outlooks
+        st.session_state['strategy_ma_snapshot'] = read_outlooks(database or DEFAULT_MARKET_DATABASE, selected, clock)
     snapshot = st.session_state.get('strategy_diagnostic_snapshot')
     if snapshot:
         st.caption('Última lectura: '+snapshot['captured_at']+'. Se actualiza al pulsar el botón.')
@@ -49,6 +53,10 @@ def render_strategy_diagnostics(symbols, *, database=None, now=None):
             st.warning('No se pudo leer el diagnóstico en el tiempo disponible. Puedes actualizarlo de nuevo.')
     else:
         st.info('Pulsa Actualizar diagnóstico para consultar los registros actuales de mercado.')
+    ma_snapshot=st.session_state.get('strategy_ma_snapshot')
+    if ma_snapshot:
+        from ma_outlook_panel import render_saved_outlooks
+        render_saved_outlooks({**ma_snapshot,'events':[e for e in ma_snapshot['events'] if e['symbol'] in selected]},st=st)
     report_path = Path(__file__).resolve().parent/'exports/trade_review/reference_audits/latest.json'
     try:
         if report_path.stat().st_size > 100000:

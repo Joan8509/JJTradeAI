@@ -29,7 +29,8 @@ class BrokerProfitTargets:
                 continue
             if buy.get('external_close_hold'):
                 self._publish(buy['contract'],'EXTERNAL_MANUAL_CLOSE_DETECTED');continue
-            if any(r['state']=='REJECTED' for r in children):
+            from real_exit_recovery import unresolved_rejections
+            if unresolved_rejections(buy,children):
                 self._publish(buy['contract'],'BROKER_TARGET_REJECTED',error=True,review=True,parent_id=buy['id']);continue
             uncertain=next((r for r in children if r.get('exit_role')=='BROKER_TARGET' and r['state'] in UNCERTAIN),None)
             if uncertain:
@@ -44,6 +45,8 @@ class BrokerProfitTargets:
             if active:
                 native=next((r for r in active if r.get('exit_role')=='BROKER_TARGET'),None)
                 if native:self._publish(buy['contract'],'BROKER_TARGET_'+native['state'],limit=native['limit'])
+                else:self._publish(buy['contract'],'PRICE_EXIT_'+active[0]['state'],limit=active[0]['limit'],
+                    error=active[0]['state'] in UNCERTAIN,review=active[0]['state'] in UNCERTAIN,parent_id=buy['id'])
                 continue
             if now<self._retry.get(buy['id'],now):continue
             start,end=self.execution.exit_session_provider(now) if self.execution.exit_session_provider else (
@@ -61,8 +64,10 @@ class BrokerProfitTargets:
                     parent_id=buy['id'],account_number=self.execution._account_number,now=self.clock())
                 result=self.execution.place_broker_target(buy['id'],draft,proof)
                 review=result['state'] in UNCERTAIN or result['state']=='REJECTED'
+                not_sent=result['state']=='EXPIRED' and 'ORDER_HTTP_NOT_ATTEMPTED' in result.get('issues',[])
                 self._publish(buy['contract'],'BROKER_TARGET_'+result['state'],limit=result['limit'],
-                    error=review,review=review,parent_id=buy['id'])
+                    error=review or not_sent,review=review,parent_id=buy['id'])
+                if not_sent:self._retry[buy['id']]=aware(self.clock())+timedelta(seconds=15)
             except Exception as error:
                 code=getattr(error,'code',None) or str(error)
                 import re

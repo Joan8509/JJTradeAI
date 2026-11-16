@@ -13,6 +13,66 @@ from schwab_option_order_request import prepare_option_limit
 
 
 class RealQueueTests(TestCase):
+    def test_signal_hints_skip_idle_companies_before_preparation_and_read_once(self):
+        self.single_radar()
+        hints=Mock(return_value=frozenset({'MSFT'}))
+        provider=Mock(side_effect=self.any_company)
+        self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=hints)
+        hints.assert_called_once_with(('AAPL','MSFT'))
+        self.assertEqual([c.args[0]['symbol'] for c in provider.call_args_list],['MSFT'])
+        self.assertTrue(self.execution.enter.call_args.kwargs['draft'].contract.startswith('MSFT'))
+
+    def test_hint_is_not_authorization_and_next_turn_can_observe_new_signal(self):
+        hints=Mock(return_value=frozenset())
+        provider=Mock(return_value=None)
+        self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=hints)
+        provider.assert_not_called();self.execution.enter.assert_not_called()
+        hints.return_value=frozenset({'AAPL'})
+        self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=hints)
+        provider.assert_called_once();self.execution.enter.assert_not_called()
+        self.assertEqual(hints.call_count,2)
+
+    def test_failed_or_invalid_hint_falls_back_to_original_lookup(self):
+        for value in (None,['MSFT']):
+            hints=Mock(return_value=value);provider=Mock(return_value=None)
+            self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=hints)
+            self.assertEqual(provider.call_count,2)
+        provider=Mock(return_value=None)
+        self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=Mock(side_effect=OSError()))
+        self.assertEqual(provider.call_count,2)
+
+    def test_pause_does_not_query_hints_and_keeps_exit_monitor(self):
+        self.queue.pause(journal.BINDING)
+        hints=Mock();provider=Mock()
+        self.queue.step(journal.BINDING,self.execution,provider,signal_symbols=hints)
+        hints.assert_not_called();provider.assert_not_called();self.execution.poll.assert_called_once()
+
+    def test_positive_hint_cannot_bypass_atomic_removal(self):
+        plan=self.queue.read(journal.BINDING)
+        def removed(row):
+            self.queue.remove(journal.BINDING,plan['id'],row['id'])
+            return self.any_company(row)
+        with self.assertRaisesRegex(RealOrderBlocked,'LIVE_QUEUE_PAUSED'):
+            self.queue.step(journal.BINDING,self.execution,removed,signal_symbols=lambda symbols:{'AAPL'})
+        self.execution.enter.assert_not_called()
+
+    def test_recovered_ack_keeps_original_claim_and_excludes_other_companies_on_fill(self):
+        self.single_radar()
+        request=dict(id='RECOVERED',intent='SIGNAL_AAPL',state='SUBMITTING',broker_id=None,fills={})
+        self.execution.ledger.requests.return_value=[request]
+        self.execution.enter.side_effect=OSError('SYNTHETIC_ACK_SAVE_FAILED')
+        self.step(self.any_company)
+        plan=self.queue.read(journal.BINDING)
+        self.assertEqual(plan['rows'][0]['request_id'],'RECOVERED')
+        self.assertEqual(plan['rows'][0]['state'],'REQUIRES_REVIEW')
+        request.update(broker_id='123',state='FILLED',fills={'x':dict(quantity=2)})
+        self.step(self.any_company)
+        plan=self.queue.read(journal.BINDING)
+        self.assertTrue(plan['entry_consumed'])
+        self.assertEqual(plan['rows'][1]['state'],'EXCLUDED_FIRST_ENTRY')
+        self.assertEqual(plan['rows'][0]['state'],'ORDER_SENT')
+        self.execution.enter.assert_called_once()
+
     def setUp(self):
         self.now=options.NOW;self.vault=journal.Vault()
         self.queue=RealAutomaticQueue(store_factory=lambda:self.vault,clock=lambda:self.now)

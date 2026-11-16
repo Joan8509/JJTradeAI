@@ -93,9 +93,11 @@ class AutomaticLatencyTests(unittest.TestCase):
         fixture=runtime_fixture.TelegramRuntimeTests();companion=fixture.companion()
         companion.entry_queue=Mock()
         def stop(*args):companion.stop.set()
-        with patch.object(companion.stop,'wait',side_effect=stop) as wait:
+        wake=Mock();wake.native=False;wake.wait.side_effect=stop
+        with patch('market_signal_wakeup.SignalWakeup',return_value=wake),patch('telegram_manual_runtime.time.monotonic',return_value=0):
             companion._entries()
-        wait.assert_called_once_with(.2)
+        wake.wait.assert_called_once_with(.2)
+        wake.close.assert_called_once()
         companion.api.assert_not_called()
 
 

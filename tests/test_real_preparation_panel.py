@@ -43,6 +43,40 @@ def page(initial_view='Preparar compañías'):
 
 
 class RealPreparationPanelTests(TestCase):
+    def test_consumed_queue_keeps_controls_visible_with_reason_without_rearming(self):
+        app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
+        runtime=app.session_state['real_execution_runtime']
+        runtime.queue.read.return_value=dict(id='DONE',paused=False,entry_consumed=True,entry_owner='BOUGHT',
+            session_open='2099-01-01T14:30:00+00:00',session_close='2099-01-01T21:00:00+00:00',
+            rows=[dict(id='BOUGHT',symbol='SLV',quantity=1,target='10',state='COMPLETED'),
+                  dict(id='OTHER',symbol='DIA',quantity=1,target='10',state='EXCLUDED_FIRST_ENTRY')])
+        select_real_tab(app,'Cola real')
+        self.assertEqual(len(app.exception),0)
+        for key in ('real_queue_toggle','real_queue_clear','real_queue_remove'):
+            self.assertTrue(app.button(key=key).disabled)
+        self.assertTrue(any('ya completó su operación' in x.value for x in app.info))
+        runtime.arm.assert_not_called();runtime.pause.assert_not_called()
+        runtime.remove.assert_not_called();runtime.remove_waiting.assert_not_called()
+
+    def test_in_progress_row_can_pause_entries_but_cannot_be_removed(self):
+        app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
+        runtime=app.session_state['real_execution_runtime']
+        plan=dict(id='IN_PROGRESS',paused=False,entry_owner='BUY',entry_consumed=True,
+            session_open='2099-01-01T14:30:00+00:00',session_close='2099-01-01T21:00:00+00:00',
+            rows=[dict(id='BUY',symbol='SLV',quantity=1,target='10',state='ORDER_SENT',request_id='ORDER',claim='CLAIM')])
+        runtime.queue.read.side_effect=lambda _:plan.copy()
+        runtime.pause.side_effect=lambda:plan.update(paused=True)
+        select_real_tab(app,'Cola real')
+        self.assertFalse(app.button(key='real_queue_toggle').disabled)
+        self.assertTrue(app.button(key='real_queue_clear').disabled)
+        self.assertTrue(app.button(key='real_queue_remove').disabled)
+        app.button(key='real_queue_toggle').click().run()
+        self.assertEqual(len(app.exception),0)
+        runtime.pause.assert_called_once()
+        self.assertEqual(plan['rows'][0]['state'],'ORDER_SENT')
+        runtime.close_manually.assert_not_called();runtime.arm.assert_not_called()
+        runtime.remove_waiting.assert_not_called()
+
     def test_paused_queue_displays_confirmed_manual_close_as_closed_without_orders(self):
         app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
         runtime=app.session_state['real_execution_runtime']
@@ -186,6 +220,29 @@ class RealPreparationPanelTests(TestCase):
         app.multiselect(key='real_prep_symbols').set_value(['AMZN']).run()
         self.assertTrue(app.button(key='real_prep_activate').disabled)
         app.session_state['real_execution_runtime'].arm.assert_not_called()
+
+    def test_expired_option_data_is_distinct_from_selected_account_and_keeps_rows(self):
+        app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
+        runtime=app.session_state['real_execution_runtime']
+        runtime.status.return_value=dict(ready_to_arm=False,blockers=['LIVE_OPTION_DATA_REAUTHORIZE'])
+        app.multiselect(key='real_prep_symbols').set_value(['AMZN']).run()
+        app.number_input(key='real_prep_common_quantity').set_value(2)
+        app.selectbox(key='real_prep_common_target').select('10').run()
+        app.button(key='real_prep_apply').click().run()
+        self.assertTrue(any('renovar la autorización de JJTradeAI-Datos' in x.value for x in app.warning))
+        self.assertTrue(app.button(key='real_prep_activate').disabled)
+        self.assertFalse(any('Para activar, selecciona tu cuenta' in x.value for x in app.caption))
+        client=app.session_state['test_client'];calls=list(client.method_calls)
+        runtime.can_arm.return_value=True
+        runtime.status.return_value=dict(ready_to_arm=True,blockers=[])
+        app.run()
+        self.assertEqual(len(app.exception),0)
+        self.assertEqual(app.multiselect(key='real_prep_symbols').value,['AMZN'])
+        row=app.dataframe[0].value.iloc[0]
+        self.assertEqual(row['Contratos'],2);self.assertEqual(row['Objetivo'],'10')
+        self.assertFalse(app.button(key='real_prep_activate').disabled)
+        self.assertEqual(client.method_calls,calls)
+        runtime.arm.assert_not_called()
 
     def test_pause_button_becomes_activate_and_resumes_same_plan_without_arming(self):
         from copy import deepcopy

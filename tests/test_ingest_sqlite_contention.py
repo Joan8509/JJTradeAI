@@ -17,7 +17,7 @@ class IngestContentionTests(unittest.TestCase):
 
     def exercise_lock(self,reader):
         worker=RealtimeBollingerWorker(self.db,'iex',['AAPL']);seen=Event();second=Event()
-        def observe(message,received):
+        def observe(message,received,**kwargs):
             (seen if message['i']==1 else second).set()
             return dict(symbol='AAPL',source_timestamp=message['t'],received_at=received.isoformat(),
                 signal={'side':'SUPERIOR'} if message['i']==1 else None), 'READY_NO_EXIT'
@@ -55,7 +55,7 @@ class IngestContentionTests(unittest.TestCase):
         def slow(*args,**kwargs):
             entered.set();release.wait(3)
             return original(*args,**kwargs)
-        def observe(message,received):
+        def observe(message,received,**kwargs):
             if message['i']==2:second.set()
             return dict(symbol='AAPL',source_timestamp=message['t'],received_at=received.isoformat(),
                 signal={'side':'SUPERIOR'} if message['i']==1 else None),'READY_NO_EXIT'
@@ -87,15 +87,19 @@ class IngestContentionTests(unittest.TestCase):
         original_status=worker.geometry.status;original_bars=worker.geometry.store.upsert_bars
         def status(state,stamp):entered.set();release.wait(2);original_status(state,stamp)
         def bars(values,**kwargs):sequence.append(('bars',[b.symbol for b in values]));return original_bars(values,**kwargs)
-        def observe(message,received):sequence.append(('trade',message['i']));return None,'READY_NO_EXIT'
+        def observe(message,received,**kwargs):sequence.append(('trade',message['i']));return None,'READY_NO_EXIT'
         try:
             with patch.object(worker.geometry,'status',side_effect=status),patch.object(worker.geometry.store,'upsert_bars',side_effect=bars),patch.object(worker.geometry,'observe',side_effect=observe):
                 worker.status('CONECTADO');self.assertTrue(entered.wait(1))
                 for symbol in ('AAPL','MSFT'):worker.bar(MarketBar(symbol,CANDLE,100,101,99,100,100),lambda b:None)
                 worker.trade(trade(100.,datetime.now(timezone.utc),17))
                 worker.bar(MarketBar('NVDA',CANDLE,100,101,99,100,100),lambda b:None)
-                release.set();worker.queue.join()
-                self.assertEqual(sequence,[('bars',['AAPL','MSFT']),('trade',17),('bars',['NVDA'])])
+                release.set();worker.queue.join();worker.persistence.join();worker.queue.join()
+                # Storage has its own worker: trades may precede disk commits,
+                # while persisted bar batches retain their original order.
+                self.assertEqual([item for item in sequence if item[0]=='bars'],
+                    [('bars',['AAPL','MSFT']),('bars',['NVDA'])])
+                self.assertEqual([item for item in sequence if item[0]=='trade'],[('trade',17)])
                 self.assertFalse(worker.failed.is_set())
         finally:release.set();worker.close()
 
@@ -151,7 +155,7 @@ class IngestContentionTests(unittest.TestCase):
 
     def test_exit_and_retraction_publish_urgently_even_with_long_routine_interval(self):
         worker=RealtimeBollingerWorker(self.db,'iex',['AAPL'])
-        def observe(message,received):
+        def observe(message,received,**kwargs):
             return dict(symbol='AAPL',source_timestamp=message['t'],received_at=received.isoformat(),
                 signal=dict(side='SUPERIOR',candle=CANDLE.isoformat()) if message['i']==1 else None),'READY_NO_EXIT'
         try:

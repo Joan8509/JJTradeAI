@@ -47,6 +47,7 @@ def _read_selected_account(reader,reference):
 
 def _select_account():
     reference=st.session_state.get('real_account_choice')
+    st.session_state['real_account_selection_cleared']=reference is None
     if reference!=st.session_state.get('real_selected_account_ref'):
         # This removes only the browser handle. The independent host keeps exits.
         st.session_state.pop('real_execution_runtime',None)
@@ -69,6 +70,12 @@ def render_real_account_panel():
                 _read_selected_account(reader,reference)
     inventory=reader.inventory
     if inventory is None:
+        from real_dashboard_selection import saved_selection
+        saved=saved_selection()
+        if saved:
+            st.info(saved['label']+' ya está seleccionada en la VPS. Puedes ver tus compañías en «Cola real».')
+            st.caption('Esta selección guardada no es una nueva consulta de saldo. Usa «Consultar conexión y cuentas» para actualizarlo.')
+            return
         st.caption('Todavía no se ha consultado ninguna cuenta real.')
         return
     st.caption('Última consulta de cuentas: '+_stamp(inventory['checked_at']))

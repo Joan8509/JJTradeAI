@@ -32,9 +32,15 @@ def signal_identity(tick,first):
 
 
 class RealOpportunities:
-    def __init__(self,market,capital,*,clock=lambda:datetime.now(timezone.utc),signal_reader=None,monotonic=time.monotonic):
+    def __init__(self,market,capital,*,clock=lambda:datetime.now(timezone.utc),signal_reader=None,monotonic=time.monotonic,evidence_recorder=None):
         self.market=market;self.capital=capital;self.clock=clock
-        self.reader=signal_reader or RealPreparationSession(clock=clock)
+        if signal_reader is None:
+            from real_entry_state import RealEntryStateReader
+            from market_store import DEFAULT_MARKET_DATABASE
+            signal_reader=RealPreparationSession(clock=clock,
+                read_state=RealEntryStateReader(DEFAULT_MARKET_DATABASE,clock=clock))
+        self.reader=signal_reader
+        self.evidence_recorder=evidence_recorder
         self._signals={};self._quotes={}
         self._funding_rejected=set()
         self._monotonic=monotonic;self._timing_lock=Lock();self._timings={}
@@ -53,7 +59,7 @@ class RealOpportunities:
         def advance(next_phase,**fields):
             nonlocal mark,phase
             details.update(fields)
-            now=self._monotonic();seconds[phase]=max(0.,now-mark);mark=now;phase=next_phase
+            now=self._monotonic();seconds[phase]=seconds.get(phase,0.)+max(0.,now-mark);mark=now;phase=next_phase
         try:
             result=self._prepare(row,advance)
             if result is not None:outcome='PREPARED_NOT_SENT'
@@ -63,7 +69,7 @@ class RealOpportunities:
             error_code=raw if isinstance(raw,str) and raw in ENTRY_ERROR_CODES else 'LIVE_OPPORTUNITY_UNAVAILABLE'
             outcome='UNAVAILABLE';raise
         finally:
-            ended=self._monotonic();seconds[phase]=max(0.,ended-mark)
+            ended=self._monotonic();seconds[phase]=seconds.get(phase,0.)+max(0.,ended-mark)
             seconds['total']=max(0.,ended-started)
             value=dict(checked_at=aware(self.clock()).isoformat(),outcome=outcome,
                 seconds={key:round(value,6) for key,value in seconds.items()})
@@ -118,21 +124,55 @@ class RealOpportunities:
             underlying_price=market.chain.underlying_price,underlying_stamp=market.chain.underlying_timestamp,
             as_of=now,listed_expirations=market.expirations,strike_inventory=market.strike_inventory)
         if not quotes:raise ValueError('NO_ELIGIBLE_EXPIRATION_OR_RANGE')
+        if self.evidence_recorder is not None:
+            try:
+                quoted={q.symbol for q in quotes}
+                self.evidence_recorder.publish(tuple(c for c in candidates if c.snapshot.symbol in quoted),
+                    phase='ENTRY_CANDIDATE',symbol=row['symbol'],signal_key=key,spot=market.chain.underlying_price)
+            except Exception:pass
         capacity=self.capital.funding_capacity()
         def funding_key(q):return (key,q.symbol,str(q.ask),row['quantity'],str(capacity))
         quotes=[q for q in quotes if decimal(q.ask)*100*row['quantity']<=capacity and funding_key(q) not in self._funding_rejected]
         if not quotes:raise ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
-        q=quotes[0];contract=next(c for c in candidates if c.snapshot.symbol==q.symbol)
-        end=aware(datetime.fromisoformat(state['session'][1]))
-        draft=prepare_observed_limit(contract,instruction='BUY_TO_OPEN',quantity=row['quantity'],now=now,
-            valid_until=min(deadline,end))
-        advance('broker_preview',selected_contract=q.symbol,selected_ask=str(q.ask))
-        try:self.capital.authorize(draft,row['symbol'])  # non-executing preview, never a buy
-        except ValueError as error:
-            if str(error)=='LIVE_SETTLED_CASH_INSUFFICIENT':
+        # One immediate cheaper fallback only after an explicit funds failure.
+        # No order has been sent here. Unknown/review/transport failures never
+        # trigger another preview, and the original signal deadline is retained.
+        preview_attempts=[]
+        for attempt_index in range(2):
+            q=quotes[0];contract=next(c for c in candidates if c.snapshot.symbol==q.symbol)
+            now=aware(self.clock())
+            end=aware(datetime.fromisoformat(state['session'][1]))
+            draft=prepare_observed_limit(contract,instruction='BUY_TO_OPEN',quantity=row['quantity'],now=now,
+                valid_until=min(deadline,end))
+            advance('broker_preview',selected_contract=q.symbol,selected_ask=str(q.ask),
+                funding_preview_attempts=preview_attempts)
+            try:
+                self.capital.authorize(draft,row['symbol'])  # preview only, never a buy
+            except ValueError as error:
+                if str(error)!='LIVE_SETTLED_CASH_INSUFFICIENT':raise
                 if len(self._funding_rejected)>=1024:self._funding_rejected.clear()
                 self._funding_rejected.add(funding_key(q))
-            raise
+                preview_attempts.append(dict(contract=q.symbol,ask=str(q.ask),result='INSUFFICIENT_FUNDS'))
+                if attempt_index:raise
+                # Re-read before any fallback HTTP. Retraction, changed side or
+                # expiry stop here; neither cached geometry nor a new clock wins.
+                state,latest,deadline=self.reader._signal(row['symbol'])
+                if signal_identity(latest,datetime.fromisoformat(state['detector_first_at']))!=key:return None
+                now=aware(self.clock())
+                _,_,eligible=manual_candidates(state,market,row['symbol'],side,now)
+                valid={c.snapshot.symbol for c in eligible}
+                capacity=self.capital.funding_capacity()
+                cheaper=[candidate for candidate in quotes[1:] if candidate.symbol in valid
+                    and decimal(candidate.ask)<decimal(q.ask)
+                    and decimal(candidate.ask)*100*row['quantity']<=capacity
+                    and funding_key(candidate) not in self._funding_rejected]
+                if not cheaper:raise
+                # The lowest allowed Ask gives the best remaining headroom for
+                # fees. The exact broker preview still decides affordability.
+                quotes=sorted(cheaper,key=lambda candidate:decimal(candidate.ask))
+                continue
+            preview_attempts.append(dict(contract=q.symbol,ask=str(q.ask),result='AUTHORIZED_PREVIEW'))
+            break
         advance('final_revalidation')
         state,latest,_=self.reader._signal(row['symbol'])
         if signal_identity(latest,datetime.fromisoformat(state['detector_first_at']))!=key:return None
@@ -160,6 +200,9 @@ class RealOpportunities:
         market=self.market.get_position_chain(match[1],'CALL' if match[2]=='C' else 'PUT',symbol,now,force=True)
         contract=next(c for c in market.chain.contracts if c.snapshot.symbol==symbol)
         contract.validate_identity();self._quotes[symbol]=contract
+        if self.evidence_recorder is not None:
+            try:self.evidence_recorder.publish((contract,),phase='POSITION_QUOTE',symbol=match[1],spot=market.chain.underlying_price)
+            except Exception:pass
         return contract
 
     def entry_contract(self,symbol):

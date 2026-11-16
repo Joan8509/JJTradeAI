@@ -55,8 +55,25 @@ class ManualDataError(RuntimeError):
     """Fixed codes only; never interpolate API responses, paths or private objects."""
 
 
+def _read_manual_document(db,database,symbol,session_date,*,include_radar=True):
+    """Common authoritative SQL; caller owns a fresh read transaction."""
+    session=db.execute('SELECT opens_at,closes_at FROM market_sessions WHERE session_date=?',
+        (session_date.isoformat(),)).fetchone()
+    runtime=db.execute('SELECT state,heartbeat,feed,symbols_json FROM bollinger_tick_runtime WHERE id=1').fetchone()
+    tick=db.execute('SELECT payload_json FROM bollinger_tick_latest WHERE symbol=?',(symbol,)).fetchone()
+    radar=(db.execute('SELECT payload_json FROM bollinger_radar_state WHERE symbol=?',(symbol,)).fetchone()
+        if include_radar else None)
+    decoded_tick=json.loads(tick[0]) if tick else None
+    try:first_source=detector_first_source(db,database,decoded_tick)
+    except (sqlite3.Error,ValueError,TypeError,KeyError):first_source=None
+    return {'session':session,'runtime':None if runtime is None else dict(
+        state=runtime[0],heartbeat=runtime[1],feed=runtime[2],symbols=json.loads(runtime[3])),
+        'tick':decoded_tick,'radar':json.loads(radar[0]) if radar else None,
+        'detector_first_at':first_source}
+
+
 def read_manual_state(database, symbol, session_date):
-    """Four indexed rows; bounded reader, JSON decoded after releasing SQLite."""
+    """Four indexed rows; a fresh bounded readonly connection for manual/UI."""
     started=time.monotonic()
     try:
         with closing(sqlite3.connect(Path(database).resolve().as_uri()+'?mode=ro',
@@ -64,18 +81,7 @@ def read_manual_state(database, symbol, session_date):
             db.set_progress_handler(lambda:time.monotonic()-started>2,1000)
             db.execute('PRAGMA query_only=ON')
             db.execute('BEGIN')
-            session=db.execute('SELECT opens_at,closes_at FROM market_sessions WHERE session_date=?',
-                (session_date.isoformat(),)).fetchone()
-            runtime=db.execute('SELECT state,heartbeat,feed,symbols_json FROM bollinger_tick_runtime WHERE id=1').fetchone()
-            tick=db.execute('SELECT payload_json FROM bollinger_tick_latest WHERE symbol=?',(symbol,)).fetchone()
-            radar=db.execute('SELECT payload_json FROM bollinger_radar_state WHERE symbol=?',(symbol,)).fetchone()
-            decoded_tick=json.loads(tick[0]) if tick else None
-            try:first_source=detector_first_source(db,database,decoded_tick)
-            except (sqlite3.Error,ValueError,TypeError,KeyError):first_source=None
-        return {'session':session,'runtime':None if runtime is None else dict(
-            state=runtime[0],heartbeat=runtime[1],feed=runtime[2],symbols=json.loads(runtime[3])),
-            'tick':decoded_tick,'radar':json.loads(radar[0]) if radar else None,
-            'detector_first_at':first_source}
+            return _read_manual_document(db,database,symbol,session_date)
     except (sqlite3.Error,OSError,ValueError,TypeError):
         raise ManualDataError('SIGNAL_STATE_UNAVAILABLE') from None
 
@@ -116,6 +122,9 @@ def current_manual_signal(state,symbol,now):
         if tick.get('reason')!='EXIT' or not tick.get('signal'):
             raise ManualDataError('NO_CURRENT_SIGNAL')
         signal=tick['signal']
+        from bollinger_breakout_clock import breakout_deadline
+        try:breakout_deadline(signal,aware(now))
+        except ValueError:raise ManualDataError('SIGNAL_ENTRY_WINDOW_EXPIRED') from None
         candle=canonical_candle(signal['candle'])
         opened=aware(datetime.fromisoformat(session[0]));closed=aware(datetime.fromisoformat(session[1]))
         candle_stamp=aware(datetime.fromisoformat(candle))
@@ -183,10 +192,12 @@ POSITION_QUOTE_REVISION='owned_contract_quote_v1'
 
 class ManualMarketData:
     """One shared REST client/cache. No accounts/positions/orders calls here."""
-    def __init__(self,client,*,verified_increments=None,fee_per_contract=None,direct_quotes=False):
+    def __init__(self,client,*,verified_increments=None,fee_per_contract=None,direct_quotes=False,entry_quote_batches=False):
         self.client=client;self.increments=verified_increments or {};self.fee_per_contract=fee_per_contract
         self.lock=Lock();self.cache={};self.retry_at=None;self.catalog_cache={};self.direct_quotes=direct_quotes;self.selected_cache={}
         self.position_cache={}
+        self.entry_quote_batches=entry_quote_batches
+        self.background_yield=False
         self.scoped_retries={};self.error_counts={}
 
     @staticmethod
@@ -274,6 +285,35 @@ class ManualMarketData:
                 if old and timedelta(0)<=aware(now)-old.fetched_at<timedelta(seconds=5):return old
                 if timedelta(0)<=aware(now)-complete.fetched_at<timedelta(seconds=5):return complete
         if use_full:return self.get_chain(symbol,side,now,force=True)
+        if self.direct_quotes and self.entry_quote_batches:
+            # Refresh the entire selected expiry in one lightweight quote GET
+            # where it fits the client's existing 50-symbol request limit.
+            # No strike/price prefilter: preserve every possible entry candidate.
+            contracts=tuple(c for c in complete.chain.contracts if c.snapshot.expiration==expiry)
+            if 0<len(contracts)<=49:
+                try:
+                    from selected_option_quotes import refresh_selected
+                    from dataclasses import replace
+                    payload=self.client.quotes([symbol,*[c.snapshot.symbol for c in contracts]],now)
+                    refreshed=[];last=None
+                    for contract in contracts:
+                        try:
+                            # Identity/quote validation needs this contract,
+                            # not another scan/copy of every listed expiry.
+                            single=replace(complete,chain=replace(complete.chain,contracts=(contract,)))
+                            updated=refresh_selected(single,contract.snapshot.symbol,payload,aware(now))
+                        except (ValueError,KeyError,TypeError,OverflowError):
+                            # A missing/halted/adjusted contract cannot retain
+                            # its old quote or veto unrelated valid contracts.
+                            continue
+                        refreshed.append(updated.chain.contracts[0])
+                        last=updated
+                    if not refreshed:raise ManualDataError('OPTION_CHAIN_INVALID')
+                    result=replace(last,chain=replace(last.chain,contracts=tuple(refreshed)))
+                except Exception as error:
+                    raise self._failure(now,error,('catalog',symbol,side)) from None
+                with self.lock:self._publish(self.catalog_cache,(symbol,side,expiry),result)
+                return result
         try:
             raw=self.client.chain(symbol,side,expiry,expiry,now)
             partial=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
@@ -283,7 +323,16 @@ class ManualMarketData:
         with self.lock:self._publish(self.catalog_cache,(symbol,side,expiry),result)
         return result
 
-    def prepare_calendar(self,symbol,side,now):
+    def calendar_preparation_state(self,symbol,side,now,*,refresh_after=timedelta(minutes=3)):
+        """Metadata readiness only; no HTTP and no claim that quotes are current."""
+        now=aware(now)
+        with self.lock:old=self.cache.get((symbol,side))
+        age=(now-old.fetched_at).total_seconds() if old is not None else None
+        return dict(current=age is not None and 0<=age<=300,
+                    refresh_due=age is None or not 0<=age<refresh_after.total_seconds(),
+                    age_seconds=age)
+
+    def prepare_calendar(self,symbol,side,now,*,refresh_after=timedelta(minutes=4)):
         """Background metadata lookup; network never holds the trading cache lock.
 
         Complete calendars keep their existing five-minute lifetime. Publication
@@ -293,16 +342,19 @@ class ManualMarketData:
         if side not in ('CALL','PUT') or not re.fullmatch(r'[A-Z][A-Z0-9.]{0,7}',symbol):
             raise ManualDataError('OPTION_SEARCH_INVALID')
         if self.direct_quotes is not True:raise ManualDataError('OPTION_SEARCH_INVALID')
+        if not timedelta(0)<refresh_after<=timedelta(minutes=4):raise ManualDataError('OPTION_SEARCH_INVALID')
         now=aware(now)
         with self.lock:
             self._retry_locked(now,('catalog',symbol,side))
             old=self.cache.get((symbol,side))
-            if old and timedelta(0)<=now-old.fetched_at<timedelta(minutes=4):return old
+            if old and timedelta(0)<=now-old.fetched_at<refresh_after:return old
         try:
-            raw=self.client.full_chain(symbol,side,now)
+            raw=self.client.full_chain(symbol,side,now,**({'background':True} if self.background_yield else {}))
             result=decode_manual_chain(raw,symbol,side,now,verified_increments=self.increments)
             select_entry_expiration(result.expirations,now)
         except Exception as error:
+            if getattr(error,'code',None)=='BACKGROUND_REQUEST_DEFERRED':
+                raise ManualDataError('BACKGROUND_REQUEST_DEFERRED') from None
             raise self._failure(now,error,('catalog',symbol,side)) from None
         with self.lock:
             current=self.cache.get((symbol,side))

@@ -100,12 +100,16 @@ class RealPreparationSession:
         g=tick.get('geometry') or {}
         try:
             side=detect_values(g['price'],g['previous_upper'],g['previous_lower'],g['previous_mid'],
-                g['price'],g['upper'],g['lower'],g['mid'],opening=tick['opening'])
+                g['price'],g['upper'],g['lower'],g['mid'],opening=tick['opening'],
+                opening_upper=g.get('initial_opening_upper'),opening_lower=g.get('initial_opening_lower'))
             if side!=tick['signal']['side'] or float(tick['signal']['price'])!=float(g['price']):raise ValueError
         except (KeyError,TypeError,ValueError,OverflowError):raise PreparationError('SIGNAL_GEOMETRY_NOT_VALID') from None
         first=state.get('detector_first_at')
         if not first:raise PreparationError('SIGNAL_CLOCK_UNAVAILABLE')
         first=aware(datetime.fromisoformat(first));deadline=signal_entry_deadline(first,now)
+        from bollinger_breakout_clock import breakout_deadline
+        cross_deadline=breakout_deadline(tick['signal'],now)
+        if cross_deadline is not None:deadline=min(deadline,cross_deadline)
         candle=aware(datetime.fromisoformat(canonical_candle(tick['signal']['candle'])))
         if not candle<=first<=aware(datetime.fromisoformat(tick['source_timestamp'])):
             raise PreparationError('SIGNAL_CLOCK_UNAVAILABLE')

@@ -1444,6 +1444,14 @@ def render_bollinger_dashboard() -> None:
                     senal=item['source_timestamp'])
                 st.rerun()
             context = signal.get('ma_context')
+            strength_original = next((event for event in events
+                if event.get('symbol') == item['symbol'] and event.get('feed') == item.get('feed')
+                and event.get('side') == signal['side']
+                and _parse_alert_time(event.get('candle')) == _parse_alert_time(signal.get('candle'))), None)
+            from movement_strength import render as render_strength
+            from movement_strength_store import archive_readings, identity as strength_identity
+            strength_reading = archive_readings([strength_original]) if strength_original else {}
+            render_strength(strength_reading.get(strength_identity(strength_original)) if strength_original else None,st=st)
             if not context:
                 original = next((event for event in events
                     if event.get('symbol') == item['symbol'] and event.get('provider') == item.get('provider')
@@ -1455,6 +1463,9 @@ def render_bollinger_dashboard() -> None:
                     st.caption('Contexto de la detección guardada a ' + _market_event_local_time(original['detected_at']) +
                                f" · precio de referencia {original['price']:.2f}. Es descriptivo; no confirma la salida actual.")
             if context:
+                from ma_price_outlook import outlook
+                from ma_outlook_panel import render_outlook
+                render_outlook(outlook(context,signal['side']),st=st)
                 from bollinger_ma_context import context_text
                 st.caption(context_text(context))
                 reference_levels=context.get('price_levels',{}).get('levels',[])

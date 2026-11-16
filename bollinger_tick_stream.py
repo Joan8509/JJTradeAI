@@ -25,12 +25,15 @@ from bollinger_expansion import MINIMUM_BAND_EXPANSION_PCT, expansion_evidence
 from market_calendar import MarketSessionRepository
 from market_store import MarketBarStore
 from bollinger_reference_scope import (REGULAR, active_reference_scope, required_periods)
+from bollinger_breakout_clock import observe_breakout
 
 UTC = timezone.utc
 NY = ZoneInfo('America/New_York')
 MAX_TRADE_AGE = timedelta(seconds=3)
 MAX_PENDING_AUDIT = 8192
 ROUTINE_FLUSH_SECONDS = .5
+FIRST_EXIT_INDEX_SQL = ("CREATE INDEX IF NOT EXISTS idx_bollinger_tick_exit_symbol_time "
+                        "ON bollinger_tick_audit(symbol,received_at) WHERE reason='EXIT'")
 
 
 def sqlite_busy(error):
@@ -50,6 +53,10 @@ def record_ingest_revision(database):
             'bar_storage_revision': 'ordered_async_bar_storage_v1',
             'reference_scope_fence_revision': 'scoped_pending_references_v1',
             'strategy_version': STRATEGY_VERSION,
+            'breakout_clock_revision': 1,
+            'market_wakeup_revision':1,
+            'breakout_window_seconds':30,
+            'breakout_clock_sha256':hashlib.sha256(Path(__file__).with_name('bollinger_breakout_clock.py').read_bytes()).hexdigest(),
             'source_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             'minimum_band_expansion_pct': MINIMUM_BAND_EXPANSION_PCT,
             'expansion_source_sha256': hashlib.sha256(Path(__file__).with_name('bollinger_expansion.py').read_bytes()).hexdigest(),
@@ -130,7 +137,12 @@ class TickRepository:
                     message_json TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_bollinger_tick_audit_time
                     ON bollinger_tick_audit(received_at);
+                CREATE TABLE IF NOT EXISTS bollinger_breakout_clock (
+                    feed TEXT NOT NULL, scope TEXT NOT NULL, symbol TEXT NOT NULL,
+                    candle TEXT NOT NULL, side TEXT NOT NULL, first_at TEXT NOT NULL,
+                    PRIMARY KEY(feed,scope,symbol,candle,side));
             ''')
+            db.execute(FIRST_EXIT_INDEX_SQL)
             # Rolling, private raw evidence; cap time retention on each restart.
             db.execute('DELETE FROM bollinger_tick_audit WHERE received_at < ?',
                        ((datetime.now(UTC)-timedelta(days=7)).isoformat(),))
@@ -162,6 +174,13 @@ class TickRepository:
                            for symbol, p in snapshots.items()])
             db.executemany('INSERT INTO bollinger_tick_audit '
                           '(received_at,symbol,source_timestamp,reason,message_json) VALUES(?,?,?,?,?)', audit)
+            clocks=[]
+            for symbol,p in snapshots.items():
+                for side,first in p.get('breakout_firsts',{}).items():
+                    clocks.append((feed,p['reference_scope'],symbol,p['candle'],side,first))
+            db.executemany('INSERT INTO bollinger_breakout_clock VALUES(?,?,?,?,?,?) '
+                'ON CONFLICT(feed,scope,symbol,candle,side) DO UPDATE SET '
+                'first_at=excluded.first_at WHERE excluded.first_at<bollinger_breakout_clock.first_at',clocks)
 
 
 class TickGeometry:
@@ -179,6 +198,7 @@ class TickGeometry:
         self.missed_openings = set()
         self.session_key = self.session = None
         self.reference_windows = {}
+        self.breakout_memories = OrderedDict()
 
     def bar_affects_reference(self,bar,candle):
         if bar.timestamp==candle:return True
@@ -304,6 +324,16 @@ class TickGeometry:
             if not references_pending and state['history'] is None and now >= state['retry_at']:
                 state['history'] = self._history(symbol, candle, now)
                 state['retry_at'] = now+timedelta(seconds=1)
+            if 'breakout_firsts' not in state and not references_pending:
+                clock_key=(symbol,candle)
+                if clock_key not in self.breakout_memories:
+                    with closing(sqlite3.connect(Path(self.database).resolve().as_uri()+'?mode=ro',uri=True,timeout=.025)) as db:
+                        rows=db.execute('SELECT side,first_at FROM bollinger_breakout_clock '
+                            'WHERE feed=? AND scope=? AND symbol=? AND candle=?',
+                            (self.feed,self.reference_scope,symbol,candle.astimezone(UTC).isoformat())).fetchall()
+                    self.breakout_memories[clock_key]=dict(rows)
+                    if len(self.breakout_memories)>512:self.breakout_memories.popitem(last=False)
+                state['breakout_firsts']=self.breakout_memories[clock_key]
             if not references_pending and state['opening'] is None and now >= state['open_retry_at']:
                 # Mid-candle startup/reconnection: recover the real opening
                 # from the completed FIRST minute, never the first price seen.
@@ -329,18 +359,27 @@ class TickGeometry:
                 initial_upper, initial_lower = bands_at_open(prior[1:], state['opening'])
                 side = detect_values(prior[-1], prev_upper, prev_lower, sum(prior)/20,
                     price, upper, lower, (sum(prior[1:])+price)/20,
-                    opening=state['opening'])
+                    opening=state['opening'], opening_upper=initial_upper, opening_lower=initial_lower)
                 geometry = {'upper': upper, 'lower': lower,
                     'previous_upper': prev_upper, 'previous_lower': prev_lower,
                     'mid': (sum(prior[1:])+price)/20, 'previous_mid': sum(prior)/20,
                     'opening_upper': upper, 'opening_lower': lower,
                     'initial_opening_upper': initial_upper, 'initial_opening_lower': initial_lower,
-                    'opening_reference': 'CURRENT_BANDS',
+                    'opening_reference': 'INITIAL_AND_CURRENT_BANDS',
                     'opening': state['opening'], 'price': price, 'side': side}
+                crossing = observe_breakout(state['breakout_firsts'],price,upper,lower,stamp,
+                    allow_new=self.connected_at<=candle and (symbol,candle) not in self.missed_openings)
+                geometry['breakout_clock'] = crossing
+                if side and (crossing is None or not crossing['current']):
+                    side=None
+                    geometry['side']=None
+                    reason='BREAKOUT_ENTRY_WINDOW_EXPIRED' if crossing else 'BREAKOUT_CLOCK_UNAVAILABLE'
                 if side:
                     exposure = (price-upper if side == 'SUPERIOR' else lower-price)/(upper-lower)*100
                     signal = {'side': side, 'price': price, 'candle': candle.isoformat(),
                               'band_expansion': expansion_evidence(upper, lower, prev_upper, prev_lower),
+                              'first_breakout_at':crossing['first_at'],
+                              'breakout_deadline':crossing['deadline'],
                               'exposure_pct_bandwidth': exposure, 'small_exposure': exposure < 1}
                     reason = 'EXIT'
             # History/SQLite work can consume time after the first age check.
@@ -353,8 +392,12 @@ class TickGeometry:
                     'received_at': received.isoformat(), 'checked_at': checked.isoformat(),
                     'opening': state['opening'], 'version': STRATEGY_VERSION,
                     'reference_scope': self.reference_scope,
+                    'candle':candle.astimezone(UTC).isoformat(),
+                    'breakout_firsts':dict(state.get('breakout_firsts',{})),
                     'trade_id': message['i'], 'trade_timestamp_raw': message['t'],
                     'signal': signal, 'reason': reason, 'geometry': geometry}, reason
+        except sqlite3.OperationalError:
+            return None, 'WAITING_FOR_BREAKOUT_CLOCK'
         except (KeyError, ValueError, TypeError, OverflowError):
             return None, 'INVALID_TRADE'
 
@@ -371,6 +414,8 @@ class TickPublisher:
         self.snapshots={};self.audit=[];self.inflight=0
         self.state='DESCONECTADO';self.now=datetime.now(UTC)
         self.fatal_batch=None
+        from market_signal_wakeup import CommittedSignalNotifier
+        self.signal_notifier=CommittedSignalNotifier(repository.database)
         self.thread=Thread(target=self._run,name='tick-publisher',daemon=True)
         self.thread.start()
 
@@ -396,6 +441,7 @@ class TickPublisher:
             self.failed.set()
         finally:
             if connection is not None:connection.close()
+            self.signal_notifier.close()
 
     def _publish_loop(self, connection):
         last_prune=time.monotonic()
@@ -435,6 +481,10 @@ class TickPublisher:
                 self.failed.set()
                 self.fatal_batch=batch
                 return
+            # Flush has committed before any consumer is woken. Hints never
+            # bypass a failed transaction, freshness, dedup or entry guards.
+            try:self.signal_notifier.after_commit(snapshots)
+            except Exception:pass  # Timed readers remain the reliable fallback.
             with self.lock:self.inflight=0
             batch=None
             # Retention is disk maintenance, never work on the trade evaluator.

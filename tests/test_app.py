@@ -1167,7 +1167,12 @@ class StreamlitAppTests(unittest.TestCase):
 
     def test_synthetic_demo_runs_full_analysis_without_exceptions(self) -> None:
         # The analysis module is retained internally, outside the simplified navigation.
-        app = AppTest.from_string("from app import main, render_analysis\nmain()\nrender_analysis()").run(timeout=20)
+        app = AppTest.from_string(
+            "import streamlit as st\n"
+            "from app import GateStatus, render_analysis\n"
+            "st.session_state.setdefault('governance_status', GateStatus.NO_DISPONIBLE)\n"
+            "render_analysis()"
+        ).run(timeout=20)
         demo = next(
             item for item in app.checkbox if item.label == "Usar demostración sintética"
         )

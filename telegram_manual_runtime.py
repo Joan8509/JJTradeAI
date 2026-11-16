@@ -67,7 +67,7 @@ class Companion:
         self.poll_error_code=None;self.poll_error_operation=None;self.poll_error_at=None;self.poll_retry_after=None
         self.poll_last_success=None
         self.poll_transport_backoff=5
-        self.monitor_ready=False;self.monitor_at=None
+        self.monitor_ready=False;self.monitor_at=None;self.entry_wakeup_native=False
         self.detector_clock_ok=check_detector_clock()
         self.monitor_wake=threading.Event()
         self.notice_wake=threading.Event()
@@ -172,6 +172,7 @@ class Companion:
             _status(state,port=PORT,monitor_ready=self.monitor_ready,sale_notices_state=self.notice_state,
                 automatic_entry_revision=ENTRY_LATENCY_REVISION,automatic_entry_poll_ms=int(ENTRY_POLL_SECONDS*1000),
                 automatic_entry_lifetime_seconds=10,entry_monitor_wakeup=True,
+                market_wakeup_revision=1,market_wakeup_native=self.entry_wakeup_native,
                 signal_entry_window_seconds=SIGNAL_ENTRY_WINDOW_SECONDS,
                 signal_window_revision=SIGNAL_WINDOW_REVISION,
                 execution_notice_wakeup=True,
@@ -244,13 +245,18 @@ class Companion:
         except Exception:pass
 
     def _entries(self):
-        while not self.stop.is_set():
-            worked=False
-            try:worked=self.entry_queue.step() is True
-            except Exception:
-                try:self.entry_queue.store.heartbeat(self.service.workflow.clock(),'CHECK_REQUIRED')
-                except Exception:pass
-            self.stop.wait(0 if worked else ENTRY_POLL_SECONDS)
+        from market_signal_wakeup import SignalWakeup
+        wake=SignalWakeup(DEFAULT_MARKET_DATABASE,'simulation')
+        self.entry_wakeup_native=wake.native
+        try:
+            while not self.stop.is_set():
+                started=time.monotonic();worked=False
+                try:worked=self.entry_queue.step() is True
+                except Exception:
+                    try:self.entry_queue.store.heartbeat(self.service.workflow.clock(),'CHECK_REQUIRED')
+                    except Exception:pass
+                wake.wait(0 if worked else max(0.,ENTRY_POLL_SECONDS-(time.monotonic()-started)))
+        finally:wake.close()
 
     def _entry_auxiliary(self):
         while not self.stop.is_set():

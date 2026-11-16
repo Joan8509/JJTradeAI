@@ -46,3 +46,15 @@ Los métodos existentes del host, incluida adquisición atómica de una entrada,
 son iguales al respaldo por AST. Solo la interfaz necesita recargarse. El estado
 de carga y las pruebas efectivamente completadas se registran en el contexto y
 el diario; las pruebas no activan la cola productiva.
+# Actualización 13/11/2026: visibilidad de controles
+
+En Cola real los tres controles aparecen antes de la tabla cuando existe una
+cola: Pausar/Activar, Eliminar todas las compañías en espera y Quitar compañía.
+Antes desaparecían todos si no había filas removibles, lo que confundía una
+cola ya consumida con controles ausentes. Ahora permanecen visibles y se
+deshabilitan con explicación cuando no hay acción válida.
+
+Pausar está disponible incluso con una fila en seguimiento y sin compañías
+removibles: solo pausa nuevas entradas. Una orden iniciada no se puede retirar
+con estos botones; conserva sus salidas. Activar exige los controles originales
+y nunca rearma una cola consumida. Sin cambios de API, órdenes o estrategia.

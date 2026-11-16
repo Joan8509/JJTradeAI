@@ -23,10 +23,13 @@ from market_calendar import MarketSessionRepository
 from telegram_alerts import CONFIG_PATH, TelegramError, connection, send_message
 from bollinger_ma_context import live_context
 from watchlist_config import load_watchlist
+from bollinger_notice_bandwidth import NoticeBandCache, text_for as bandwidth_text
+
+_NOTICE_BAND_CACHE = NoticeBandCache()
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
-STRATEGY_VERSION = "v5_apertura_dentro_bandas_actuales"
+STRATEGY_VERSION = "v7_ruptura_temprana_30s"
 # Stable event identity across the authorized opening interpretation update.
 # Payload version changes; existing events and notification claims never replay.
 EVENT_KEY_VERSION = "v4_apertura_dentro_sin_veto_previo"
@@ -101,9 +104,12 @@ def detect_exit(prepared):
         return None
     if latest.get('open') is None or not math.isfinite(float(latest.get('open'))):
         return None
+    opening_upper = opening_lower = None
+    if len(prepared) >= 20:
+        opening_upper, opening_lower = bands_at_open(prepared.iloc[-20:-1]['close'].tolist(), latest.get('open'))
     side = detect_values(previous.close, previous.bollinger_upper, previous.bollinger_lower, previous.bollinger_mid,
                          latest.close, latest.bollinger_upper, latest.bollinger_lower, latest.bollinger_mid,
-                         opening=latest.get("open"))
+                         opening=latest.get("open"), opening_upper=opening_upper, opening_lower=opening_lower)
     if side is None:
         return None
     distance=float(latest.close-latest.bollinger_upper) if side=='SUPERIOR' else float(latest.bollinger_lower-latest.close)
@@ -121,17 +127,42 @@ def bands_at_open(prior_closes, opening):
     return mean+2*deviation, mean-2*deviation
 
 
-def detect_values(previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid, *, opening=None, opening_upper=None, opening_lower=None):
-    """Shared live/replay rule. Legacy opening-band kwargs are audit-only.
+def opening_bands_from_moments(close, upper, lower, mid, opening):
+    """Replace current price with official opening in the same 20-price window.
 
-    User clarification26/10: compare this candle's genuine opening with the
-    bands available NOW, not bands frozen at its first trade. No future close.
+    Mean and population variance retain sufficient information about the other
+    nineteen closes. Stable replacement formula; no history query or waiting.
+    Live callers supply direct 19-close bands instead, avoiding roundoff at edges.
+    """
+    variance = ((upper-lower)/4)**2
+    new_mid = mid+(opening-close)/20
+    new_m2 = 20*variance+(opening-close)*(opening-new_mid+close-mid)
+    if not math.isfinite(new_m2) or new_m2 < 0:
+        raise ValueError('INVALID_OPENING_MOMENTS')
+    distance = 2*math.sqrt(new_m2/20)
+    return new_mid+distance, new_mid-distance
+
+
+def detect_values(previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid, *, opening=None, opening_upper=None, opening_lower=None):
+    """Shared v6 rule: a candle already outside at its opening is excluded.
+
+    Explicit user correction06/11 supersedes dynamic membership26/10. Preserve
+    current-band membership too; no previous-close veto or candle-close wait.
     """
     if not all(math.isfinite(float(value)) for value in (previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid)):
         return None
     if opening is None or not math.isfinite(float(opening)):
         return None
     if not lower <= opening <= upper:
+        return None
+    try:
+        if opening_upper is None and opening_lower is None:
+            opening_upper, opening_lower = opening_bands_from_moments(close, upper, lower, mid, opening)
+        if (opening_upper is None or opening_lower is None
+            or not all(math.isfinite(float(v)) for v in (opening_upper, opening_lower))
+            or not opening_lower <= opening <= opening_upper):
+            return None
+    except (ValueError, TypeError, OverflowError):
         return None
     # Opening stays fixed/official; only the live bands evolve. An opening
     # still outside those current bands cannot authorize an exit.
@@ -161,10 +192,20 @@ def message_for(symbol, signal, source_time):
     name = reference['name'] if reference else STOCK_INSTRUMENTS.get(symbol, {}).get('name')
     company = f"{symbol} · {name}" if name else symbol
     local = pd.Timestamp(signal.get('candle', source_time)).to_pydatetime().astimezone(ZoneInfo("America/New_York"))
+    end = local + timedelta(minutes=15)
+    observed = pd.Timestamp(source_time).to_pydatetime().astimezone(ZoneInfo("America/New_York"))
+    expansion = signal.get('band_expansion') or {}
+    edge = expansion.get('upper' if signal['side'] == 'SUPERIOR' else 'lower')
+    evidence = ''
+    if edge is not None and signal.get('price') is not None:
+        evidence = f" · Precio {signal['price']:.6f} · Banda {edge:.6f}"
+    evidence += bandwidth_text(signal,signal.get('notice_bandwidth'),source_time)
+    feed = signal.get('feed')
+    source_label = f" · Fuente {feed.upper()}" if feed else ''
     price_range = f"${reference['optimal_low']:g} – ${reference['optimal_high']:g}" if reference else "Sin rango definido"
     return (f"{company}\n"
-            f"Salida: {signal['side'].lower()}\n"
-            f"Vela: 15 min · {local:%I:%M %p} ET\n"
+            f"Salida: {signal['side'].lower()}{evidence}\n"
+            f"Vela: {local:%d/%m/%Y %H:%M}–{end:%H:%M} ET · Detectada {observed:%H:%M:%S}{source_label}\n"
             f"Rango de precios: {price_range}")
 
 
@@ -299,6 +340,7 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
             continue
         source_kind='BAR'
         opening=None
+        notice_bandwidth=None
         if symbol in tick_symbols:
             if not stream_ready:
                 continue
@@ -316,7 +358,13 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
             provider,feed=payload['provider'],payload['feed']
             received=payload['received_at']
             opening=payload.get('opening')
-            signal=payload.get('signal')
+            if payload.get('version')==STRATEGY_VERSION:
+                notice_bandwidth=_NOTICE_BAND_CACHE.observe(database,payload,now)
+            signal=payload.get('signal') if payload.get('version')==STRATEGY_VERSION else None
+            if signal is not None:
+                from bollinger_breakout_clock import breakout_deadline
+                try:breakout_deadline(signal,now)
+                except ValueError:signal=None
             observed+=1
         else:
             provider=feed=None
@@ -325,10 +373,27 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
             if result is None:
                 continue
             provider,feed,source_time,received,signal,opening=result
+            if signal is not None:
+                # A closed minute cannot manufacture a new intrabar clock.
+                # Fallback notices require an exit already observed by the stream.
+                with _database(database) as db:
+                    has_clock=db.execute("SELECT 1 FROM sqlite_master WHERE name='bollinger_breakout_clock'").fetchone()
+                    first=db.execute('SELECT first_at FROM bollinger_breakout_clock WHERE feed=? AND scope=? AND symbol=? AND candle=? AND side=?',
+                        (feed,reference_scope,symbol,canonical_candle(signal['candle']),signal['side'])).fetchone() if has_clock else None
+                if first is None or provider.upper()!='ALPACA':
+                    signal=None
+                else:
+                    signal=dict(signal,first_breakout_at=first[0],
+                        breakout_deadline=(datetime.fromisoformat(first[0])+timedelta(seconds=30)).isoformat())
+                    from bollinger_breakout_clock import breakout_deadline
+                    try:breakout_deadline(signal,now)
+                    except ValueError:signal=None
             observed+=1
         if signal is not None:
             signal = dict(signal)
             signal['candle'] = canonical_candle(signal['candle'])
+            if notice_bandwidth is not None:
+                signal['notice_bandwidth']=notice_bandwidth
         detected_time=wall_time()
         support_started=time.perf_counter()
         if signal is not None and support_worker is None:
@@ -359,7 +424,7 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
                      "source_timestamp": source_time.isoformat(), "source_kind":source_kind,
                      "detected_at": detected_time.isoformat(), "version": STRATEGY_VERSION, "opening": opening}
             keys = candle_keys(f"{EVENT_KEY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])
-            keys = tuple(dict.fromkeys(keys+candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])))
+            keys = tuple(dict.fromkeys(keys+candle_keys(f"v5_apertura_dentro_bandas_actuales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"v6_apertura_dentro_bandas_iniciales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])))
             existing = db.execute(f"SELECT event_key FROM bollinger_live_events WHERE event_key IN ({','.join('?' for _ in keys)}) ORDER BY detected_at LIMIT 1", keys).fetchone()
             event_key = existing[0] if existing else keys[0]
             if existing is None:
@@ -381,6 +446,9 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
                else timedelta(minutes=1)<=send_started-source_time<=timedelta(minutes=3))
         if not fresh:
             continue
+        from bollinger_breakout_clock import breakout_deadline
+        try:breakout_deadline(signal,wall_time())
+        except ValueError:continue
         if source_kind=='TRADE':
             # Recheck current geometry immediately before claiming the send.
             with _database(database) as db:
@@ -388,8 +456,15 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
                 runtime=db.execute('SELECT state,heartbeat FROM bollinger_tick_runtime WHERE id=1').fetchone()
             current=json.loads(latest[0]) if latest else {}
             current_signal=current.get('signal')
+            from bollinger_breakout_clock import breakout_deadline
+            try:
+                if current_signal:breakout_deadline(current_signal,wall_time())
+                breakout_deadline(signal,wall_time())
+            except ValueError:
+                continue
             if (not runtime or runtime[0]!='CONECTADO' or not timedelta(0)<=send_started-datetime.fromisoformat(runtime[1])<=timedelta(seconds=3)
                 or current.get('reference_scope',REGULAR)!=reference_scope or active_reference_scope()!=reference_scope
+                or current.get('version')!=STRATEGY_VERSION
                 or not current_signal or current_signal['side']!=signal['side'] or canonical_candle(current_signal['candle'])!=signal['candle']
                 or not timedelta(0)<=send_started-datetime.fromisoformat(current['source_timestamp'])<=timedelta(seconds=3)):
                 continue
@@ -399,7 +474,7 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
             continue
         telegram_time=None
         try:
-            result = sender(message_for(symbol, signal, source_time))
+            result = sender(message_for(symbol, {**signal, 'feed':feed}, source_time))
             state, message_id, error = "ENVIADO", result.get("message_id"), None
             if isinstance(result.get('date'),(int,float)):
                 telegram_time=datetime.fromtimestamp(result['date'],timezone.utc).isoformat()
@@ -545,6 +620,8 @@ def main():
     except OSError:
         return
     support_worker=SignalSupportWorker()
+    from market_signal_wakeup import SignalWakeup
+    signal_wakeup=SignalWakeup(DEFAULT_MARKET_DATABASE,'radar')
     health_at = 0
     feed_health = {}
     readiness_at = 0
@@ -554,7 +631,10 @@ def main():
             status = tick(support_worker=support_worker)
         except Exception:
             status = {"state": "ERROR", "error": "No se pudo completar la revisión. Revisa los datos y la conexión."}
-        status.update({"heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid()})
+        status.update({"heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+                       "notice_interval_revision": 1,"market_wakeup_revision":1,
+                       "notice_bandwidth_revision":2,
+                       "market_wakeup_native":signal_wakeup.native})
         if time.monotonic()-health_at >= 5:
             from radar_health import fast_feed_health
             try:
@@ -573,7 +653,7 @@ def main():
         except (OSError, sqlite3.Error):
             status['delivery_status_unavailable'] = True
         write_status(status)
-        time.sleep(.25 if status.get('price_mode')=='TRADES' else 1)
+        signal_wakeup.wait(.25 if status.get('price_mode')=='TRADES' else 1)
 
 
 if __name__ == "__main__":

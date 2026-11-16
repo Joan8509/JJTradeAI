@@ -61,6 +61,7 @@ exports/trade_review/
 
 # DPAPI configuration, service gates and local task validation receipts
 exports/private_runtime/
+exports/movement_strength.sqlite3*
 exports/vps_transfer/
 
 exports/runtime_candidates/

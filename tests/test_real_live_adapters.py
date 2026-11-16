@@ -238,12 +238,82 @@ class LiveAdapterTests(TestCase):
         def authorize(draft,symbol):
             if draft.contract==first.snapshot.symbol:raise ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
         capital.authorize.side_effect=authorize
-        with self.assertRaisesRegex(ValueError,'INSUFFICIENT'):provider(f.rows[0])
         result=provider(f.rows[0])
         self.assertEqual(result['draft'].contract,second.snapshot.symbol)
         self.assertEqual(result['first_signal_at'],f.h.f.now)
         self.assertEqual(capital.authorize.call_count,2)
         self.assertEqual(f.h.f.engine.ledger.orders(),[])
+
+    def test_no_cheaper_candidate_does_not_repeat_preview(self):
+        provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+        market=provider.market.get_catalog_chain.return_value
+        provider.market.get_catalog_chain.return_value=replace(market,chain=replace(market.chain,contracts=(first,)))
+        capital.authorize.side_effect=ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
+        with self.assertRaisesRegex(ValueError,'INSUFFICIENT'):provider(f.rows[0])
+        self.assertEqual(capital.authorize.call_count,1)
+
+    def test_successful_fallback_accumulates_preview_timing_and_retains_original_deadline(self):
+        provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+        original_deadline=provider.reader._signal('AMZN')[2]
+        ticks=iter(range(100));provider._monotonic=lambda:next(ticks)
+        def authorize(draft,symbol):
+            self.assertLessEqual(draft.expires_at,original_deadline)
+            if draft.contract==first.snapshot.symbol:raise ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
+        capital.authorize.side_effect=authorize
+        result=provider(f.rows[0])
+        self.assertEqual(result['first_signal_at'],f.h.f.now)
+        self.assertEqual(provider.timing_status()['AMZN']['seconds']['broker_preview'],2)
+        self.assertEqual(capital.authorize.call_count,2)
+        attempt=next(iter(provider.attempt_status().values()))
+        self.assertEqual([r['result'] for r in attempt['funding_preview_attempts']],
+            ['INSUFFICIENT_FUNDS','AUTHORIZED_PREVIEW'])
+
+    def test_funding_capacity_deducts_unsettled_fills_and_reserved_fees(self):
+        self.guard.refresh()
+        self.ledger.requests.return_value=[dict(instruction='BUY_TO_OPEN',state='WORKING',limit='1',quantity=2,
+            created_at=self.now.isoformat(),estimated_cost='201.30',fills={})]
+        self.assertEqual(self.guard.funding_capacity(),Decimal('198.70'))
+        self.assertIsNone(self.guard.permit)
+
+    def test_funding_fallback_stops_after_two_previews_and_records_reasons(self):
+        provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+        capital.authorize.side_effect=ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
+        with self.assertRaisesRegex(ValueError,'INSUFFICIENT'):provider(f.rows[0])
+        self.assertEqual(capital.authorize.call_count,2)
+        attempt=next(iter(provider.attempt_status().values()))
+        self.assertEqual([r['ask'] for r in attempt['funding_preview_attempts']],
+            [str(first.snapshot.ask),str(second.snapshot.ask)])
+        self.assertTrue(all(r['result']=='INSUFFICIENT_FUNDS' for r in attempt['funding_preview_attempts']))
+        self.assertEqual(f.h.f.engine.ledger.orders(),[])
+
+    def test_warning_or_unknown_preview_failure_never_tries_another_contract(self):
+        for error in (ValueError('LIVE_PREVIEW_NOT_ACCEPTED'),RuntimeError('PRIVATE_TRANSPORT_ERROR')):
+            provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+            capital.authorize.side_effect=error
+            with self.assertRaises(type(error)):provider(f.rows[0])
+            self.assertEqual(capital.authorize.call_count,1)
+            self.assertEqual(provider._funding_rejected,set())
+
+    def test_funding_fallback_rechecks_retracted_or_expired_signal_before_preview(self):
+        for code in ('NO_CURRENT_SIGNAL','SIGNAL_ENTRY_WINDOW_EXPIRED'):
+            provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+            def reject(draft,symbol):
+                provider.reader._signal=Mock(side_effect=ValueError(code))
+                raise ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
+            capital.authorize.side_effect=reject
+            with self.assertRaisesRegex(ValueError,code):provider(f.rows[0])
+            self.assertEqual(capital.authorize.call_count,1)
+            self.assertEqual(f.h.f.engine.ledger.orders(),[])
+
+    def test_funding_fallback_rechecks_available_cash_without_reducing_quantity(self):
+        provider,f,first,second,capital=self.two_choices(Decimal('100000'))
+        def reject(draft,symbol):
+            capital.funding_capacity.return_value=Decimal('0')
+            raise ValueError('LIVE_SETTLED_CASH_INSUFFICIENT')
+        capital.authorize.side_effect=reject
+        with self.assertRaisesRegex(ValueError,'INSUFFICIENT'):provider(f.rows[0])
+        self.assertEqual(capital.authorize.call_count,1)
+        self.assertEqual(capital.authorize.call_args.args[0].quantity,f.rows[0]['quantity'])
 
     def test_profit_exit_reprices_lower_bid_above_target_without_waiting_quote_expiry(self):
         f=cycle.RealExecutionCycleTests();f.setUp();quote=f.quote
