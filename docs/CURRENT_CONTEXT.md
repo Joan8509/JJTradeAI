@@ -2,7 +2,8 @@
 
 Actualizado 2026-11-16T13:49:57-05:00. Usuario solicita guardar en GitHub todas las mejoras.
 Checkpoint tecnico: [GITHUB_CHECKPOINT_2026-11-16.md](GITHUB_CHECKPOINT_2026-11-16.md).
-Publicacion pendiente hasta comprobar SHA remoto; no afirmar push antes.
+Codigo publicado y verificado en main: 286c7cfff6614ef381ac641ac1ac2086d1248ed9.
+Consulta directa de refs/heads/main coincide con el commit local.
 
 ## Reglas y prioridades vigentes
 

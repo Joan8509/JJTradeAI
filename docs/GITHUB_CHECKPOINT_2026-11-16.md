@@ -27,3 +27,11 @@ detectados se incluyen. GitHub conserva desarrollo, no un backup restaurable de
 todos los datos de la VPS. No se reinician servicios, arman colas, envian ordenes
 o prueban avisos durante este guardado. Publicacion pendiente hasta verificar
 que HEAD coincide con refs/heads/main remoto.
+
+## Publicacion del codigo verificada
+
+2026-11-16T15:05:47-05:00: commit 286c7cfff6614ef381ac641ac1ac2086d1248ed9 publicado en main.
+Consulta directa de refs/heads/main confirma igualdad exacta con HEAD local.
+135 archivos incluidos;503pruebas dirigidas aprobadas87.955s;diffcheck limpio.
+Este recibo documental se conserva en un commit posterior. Datos privados y
+79documentos historicos locales se conservan sin publicar ni borrar.
