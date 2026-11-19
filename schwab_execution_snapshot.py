@@ -16,6 +16,8 @@ from schwab_connection import aware
 from schwab_contracts import decimal
 from schwab_reconciliation import contracts_integer
 
+CANCEL_ACTIVITY_REVISION=1
+
 
 @dataclass(frozen=True)
 class ExecutionSnapshot:
@@ -26,6 +28,32 @@ class ExecutionSnapshot:
     status: str
     fills: tuple = field(repr=False)
     issues: tuple
+
+
+def _cancellation_record(activity,leg,*,status,unfilled,payload):
+    """A zero-price cancellation acknowledgement is not an executed fill.
+
+    Recognize only the observed SINGLE-leg terminal shape. Unknown activities,
+    positive prices and mismatched quantities/identities remain unsupported.
+    """
+    try:
+        executions=activity.get('executionLegs')
+        if (status!='CANCELED' or activity.get('activityType')!='EXECUTION'
+                or activity.get('executionType')!='CANCELED' or unfilled<=0
+                or contracts_integer(activity['quantity'])!=unfilled
+                or contracts_integer(activity['orderRemainingQuantity'])!=0
+                or not isinstance(executions,list) or len(executions)!=1):return False
+        item=executions[0]
+        if (leg.get('legId') is None or item.get('legId')!=leg['legId']
+                or contracts_integer(item['quantity'])!=unfilled
+                or decimal(item['price'])!=0 or decimal(item.get('mismarkedQuantity',0))!=0):return False
+        instrument=leg.get('instrument',{}).get('instrumentId')
+        if instrument is not None and item.get('instrumentId')!=instrument:return False
+        stamp=aware(datetime.fromisoformat(item['time'].replace('Z','+00:00')))
+        if payload.get('enteredTime') and stamp<aware(datetime.fromisoformat(payload['enteredTime'].replace('Z','+00:00'))):return False
+        if payload.get('closeTime') and stamp>aware(datetime.fromisoformat(payload['closeTime'].replace('Z','+00:00'))):return False
+        return True
+    except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError):return False
 
 
 def normalize_execution_snapshot(payload, *, account_number):
@@ -79,6 +107,8 @@ def normalize_execution_snapshot(payload, *, account_number):
         if not isinstance(activity, dict):
             raise ValueError('ACTIVITY_INVALID')
         if activity.get('executionType') != 'FILL':
+            if _cancellation_record(activity,leg,status=raw,unfilled=quantity-filled,payload=payload):
+                continue
             if activity.get('executionLegs'):
                 issues.append('UNSUPPORTED_EXECUTION_ACTIVITY')
             continue

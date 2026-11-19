@@ -83,6 +83,12 @@ class RealExecutionHost:
         if self.entry_provider is not None and self.entry_provider.evidence_recorder is not None:
             value['option_evidence']=self.entry_provider.evidence_recorder.status()
         value['entry_state_reader_revision']=getattr(getattr(getattr(self.entry_provider,'reader',None),'read_state',None),'revision',0)
+        value['entry_selected_revalidation_revision']=getattr(self.entry_provider,'selected_revalidation_revision',0)
+        value['exit_calendar_latency_revision']=1
+        from schwab_execution_snapshot import CANCEL_ACTIVITY_REVISION
+        value['cancel_activity_revision']=CANCEL_ACTIVITY_REVISION
+        from real_order_ledger import JOURNAL_CHANGE_ONLY_REVISION
+        value['journal_change_only_revision']=JOURNAL_CHANGE_ONLY_REVISION
         value['entry_funding_selection_revision']=1
         value['entry_attempt_diagnostics_revision']=1
         value['entry_quote_batch_revision']=1 if self.market is not None and self.market.entry_quote_batches is True else 0
@@ -161,7 +167,7 @@ class RealExecutionHost:
         execution=connect_live_execution(context,quote_contract=provider.quote_contract,
             entry_ready=lambda:not self.deployment_hold and self._market_authorization_current() and guard.entry_ready(),
             signal_current=provider.signal_current,entry_admission=guard.permits,ledger=self.ledger,clock=self.clock,
-            exit_session_provider=__import__('real_live_control').next_official_session,entry_quote_provider=provider.entry_contract,
+            exit_session_provider=__import__('real_live_control').exit_official_session,entry_quote_provider=provider.entry_contract,
             entry_cost=guard.estimated_cost,submission_receipts=RealSubmissionReceipts())
         execution.exit_admission=guard.exit_permitted
         execution.exit_retry_proof=guard.rejected_exit_retry_proof

@@ -30,6 +30,12 @@ class DynamicOpeningTests(TestCase):
         self.assertEqual(EVENT_KEY_VERSION,'v4_apertura_dentro_sin_veto_previo')
 
     def test_existing_v4_event_and_uncertain_notice_are_not_replayed_by_v5(self):
+        self._assert_existing_event_not_replayed(EVENT_KEY_VERSION)
+
+    def test_existing_v7_event_and_uncertain_notice_are_not_replayed_by_v8(self):
+        self._assert_existing_event_not_replayed('v7_ruptura_temprana_30s')
+
+    def _assert_existing_event_not_replayed(self, event_version):
         from tests import test_bollinger_contract as fixtures
         from bollinger_tick_stream import TickRepository
         from bollinger_phone_worker import tick,candle_keys
@@ -43,9 +49,9 @@ class DynamicOpeningTests(TestCase):
             source_timestamp=h.now.isoformat(),received_at=h.now.isoformat(),checked_at=h.now.isoformat(),
             opening=100.,version=STRATEGY_VERSION,signal=signal)
         TickRepository(h.database).flush({'AAPL':payload},[],state='CONECTADO',feed='iex',symbols=['AAPL'],now=h.now)
-        event_key=candle_keys(EVENT_KEY_VERSION+'|ALPACA|iex|AAPL',signal['candle'],'SUPERIOR')[0]
+        event_key=candle_keys(event_version+'|ALPACA|iex|AAPL',signal['candle'],'SUPERIOR')[0]
         notice_key=candle_keys('v1|fixture|ALPACA|iex|AAPL',signal['candle'],'SUPERIOR')[0]
-        original=json.dumps(dict(payload,**signal,version=EVENT_KEY_VERSION))
+        original=json.dumps(dict(payload,**signal,version=event_version))
         with closing(sqlite3.connect(h.database)) as db,db:
             db.executescript('CREATE TABLE bollinger_live_events(event_key TEXT PRIMARY KEY,detected_at TEXT,payload_json TEXT);'
                 'CREATE TABLE bollinger_phone_notifications(event_key TEXT PRIMARY KEY,state TEXT,attempted_at TEXT,message_id INTEGER,error TEXT);')

@@ -40,6 +40,25 @@ _registry_lock=Lock()
 _locks={}
 
 
+def load_display_document(store):
+    """Read an atomic publication without a writer lock, for display only.
+
+    Windows can briefly deny opening a file while it is replaced. Retry that
+    sharing race only (150ms total); never cache or reuse an earlier document.
+    Identity/decryption/format errors propagate immediately.
+    """
+    for delay in (.005,.01,.02,.04,.075,None):
+        try:return store.load()
+        except OSError as error:
+            # Python's Windows CRT sometimes maps the same sharing race to
+            # EACCES without preserving winerror. Permanent denial still fails
+            # after this small budget; no ownership/decryption check is skipped.
+            access_race=(getattr(error,'winerror',None) in (5,32,33) or
+                         isinstance(error,PermissionError) and error.errno==13)
+            if not access_race or delay is None:raise
+            time.sleep(delay)
+
+
 @contextmanager
 def _byte_lock(path):
     """Same byte-zero protocol, without append/write/flush on every read."""

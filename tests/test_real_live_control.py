@@ -15,6 +15,22 @@ from tests import test_schwab_option_order_request as options
 
 
 class RealControlTests(TestCase):
+    def test_display_uses_one_consistent_journal_read_and_refreshes_next_render(self):
+        from copy import deepcopy
+        buy=dict(id='BUY',instruction='BUY_TO_OPEN',contract=journal.CONTRACT,state='FILLED',
+            exit_plan=dict(target='10'),fills={'1':dict(quantity=1,price='1',time=options.NOW.isoformat())})
+        sell=dict(id='SELL',instruction='SELL_TO_CLOSE',parent_id='BUY',state='FILLED',
+            fills={'2':dict(quantity=1,price='1.1',time=options.NOW.isoformat())})
+        ledger=Mock();ledger.display_requests.side_effect=[deepcopy([buy]),deepcopy([buy,sell])]
+        proxy=RealRuntimeProxy(journal.BINDING)
+        with patch('real_order_ledger.RealOrderLedger',return_value=ledger):
+            positions,history=proxy.display_positions()
+            self.assertEqual(ledger.display_requests.call_count,1)
+            self.assertEqual(positions[0]['quantity'],1);self.assertEqual(history[0]['state'],'OPEN')
+            positions,history=proxy.display_positions()
+            self.assertEqual(ledger.display_requests.call_count,2)
+            self.assertEqual(positions,[]);self.assertEqual(history[0]['state'],'CLOSED')
+
     def test_remove_proxy_passes_exact_plan_and_row_without_rearming(self):
         queue=Mock()
         proxy=RealRuntimeProxy('a'*64,queue=queue)

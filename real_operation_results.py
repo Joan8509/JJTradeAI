@@ -81,4 +81,4 @@ def operation_results(rows,*,now=None,period='Hoy'):
 def load_operation_results(binding,*,now=None,period='Hoy'):
     from real_order_ledger import RealOrderLedger
     # One consistent encrypted-journal read, scoped to the selected account.
-    return operation_results(RealOrderLedger().requests(binding),now=now,period=period)
+    return operation_results(RealOrderLedger().display_requests(binding),now=now,period=period)

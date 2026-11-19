@@ -32,6 +32,8 @@ def render_real_results(binding,*,go_account,go_queue):
 
 @st.fragment(run_every='5s')
 def _results(binding):
+    selected=st.session_state.get('real_workspace_view')
+    if selected is not None and selected!='Operaciones y resultados':return
     period=st.radio('Período',['Hoy','Todo el historial'],key='real_results_period',horizontal=True)
     st.button('Actualizar resultados reales',key='real_results_refresh',width='stretch')
     try:report=load_operation_results(binding,period=period)

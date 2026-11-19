@@ -56,10 +56,11 @@ class RealExecutionWorker:
                  separate_observation=False,notices=None,signal_wakeup=None,signal_symbols=None):
         self.queue=queue;self.execution=execution;self.prepare_entry=prepare_entry
         self._clock=monotonic;self._stop=Event();self._wake=signal_wakeup if signal_wakeup is not None else Event();self._mutex=Lock()
-        self._order_wake=Event();self._target_wake=Event();self._notice_wake=Event()
+        self._order_wake=Event();self._target_wake=Event();self._notice_wake=Event();self._exit_wake=Event()
         coordinator=getattr(execution,'coordinator',None)
         if coordinator is not None:coordinator.submission_observer=self._order_wake.set
         self._threads=[];self._heartbeat={};self._last_errors={};self._turn_seconds={}
+        self._running_since={};self._slow_turns={}
         self.preparation=preparation
         self.separate_observation=separate_observation;self.notices=notices
         self.targets=None
@@ -85,6 +86,7 @@ class RealExecutionWorker:
     def _loop(self,role,interval):
         while not self._stop.is_set():
             started=self._clock()
+            with self._mutex:self._running_since[role]=started
             error=None
             try:
                 if role=='exits':
@@ -97,6 +99,10 @@ class RealExecutionWorker:
                     if any(r.get('state')=='LIVE_ORDER_READ_UNAVAILABLE' for r in events):error='LIVE_ORDER_MONITOR_REQUIRES_REVIEW'
                     if any(r.get('fills') for r in events):
                         self._target_wake.set();self._notice_wake.set()
+                    if any(r.get('fills') or r.get('state') in ('CANCELED','REJECTED','EXPIRED') for r in events):
+                        # Confirmed evidence can release a reservation or change
+                        # owned size. Check exits without the periodic wait.
+                        self._exit_wake.set()
                 elif role=='notices':self.notices.step()
                 elif role=='targets':self.targets.step()
                 elif role=='external_closes':self.external_closes.step()
@@ -115,17 +121,42 @@ class RealExecutionWorker:
             with self._mutex:
                 self._heartbeat[role]=self._clock();self._last_errors[role]=error
                 self._turn_seconds[role]=self._heartbeat[role]-started
+                self._running_since.pop(role,None)
+                if self._turn_seconds[role]>=1:
+                    previous=self._slow_turns.get(role,{})
+                    self._slow_turns[role]=dict(seconds=round(self._turn_seconds[role],3),
+                        count=previous.get('count',0)+1,frames=previous.get('frames',[]))
             if role=='entries':
                 self._wake.wait(max(0.,interval-(self._clock()-started)));self._wake.clear()
-            elif role in ('orders','targets','notices'):
-                event={'orders':self._order_wake,'targets':self._target_wake,'notices':self._notice_wake}[role]
+            elif role in ('orders','targets','notices','exits'):
+                event={'orders':self._order_wake,'targets':self._target_wake,'notices':self._notice_wake,'exits':self._exit_wake}[role]
                 event.wait(max(0.,interval-(self._clock()-started)));event.clear()
             else:self._stop.wait(max(0.,interval-(self._clock()-started)))
 
     def status(self):
         with self._mutex:
             now=self._clock()
+            active={role:round(max(0.,now-stamp),3) for role,stamp in self._running_since.items()}
+            delayed={role for role,seconds in active.items() if seconds>=1}
+            if delayed:
+                # Only a delayed turn: function/file/line, never locals or text
+                # of broker responses. Retain evidence after it recovers.
+                import sys,os
+                frames=sys._current_frames()
+                for thread in self._threads:
+                    role=thread.name.removeprefix('JJTrade-real-')
+                    if role not in delayed:continue
+                    frame=frames.get(thread.ident);stack=[]
+                    while frame is not None and len(stack)<8:
+                        stack.append(dict(function=frame.f_code.co_name,
+                            file=os.path.basename(frame.f_code.co_filename),line=frame.f_lineno))
+                        frame=frame.f_back
+                    old=self._slow_turns.get(role,{})
+                    self._slow_turns[role]=dict(seconds=active[role],count=old.get('count',0),frames=stack)
             return dict(started=bool(self._threads),
+                monitor_latency_revision=1,exit_observation_wakeup_revision=1,
+                stop_exit_recovery_revision=__import__('real_execution_service').STOP_EXIT_RECOVERY_REVISION,active_turn_seconds=active,
+                slow_turns={role:dict(value,frames=[dict(f) for f in value['frames']]) for role,value in self._slow_turns.items()},
                 market_wakeup_revision=1,market_wakeup_native=bool(getattr(self._wake,'native',False)),
                 entry_signal_hints_revision=1 if self.signal_symbols is not None else 0,
                 external_closes_current=bool(self.external_closes is None or (not self._stop.is_set() and
@@ -149,6 +180,7 @@ class RealExecutionWorker:
         """Host shutdown only; pausing entries uses queue.pause instead."""
         self._stop.set();self._wake.set()
         self._order_wake.set();self._target_wake.set();self._notice_wake.set()
+        self._exit_wake.set()
         for thread in self._threads:thread.join(timeout=.25)
         close=getattr(self._wake,'close',None)
         if callable(close) and not any(t.is_alive() and t.name.endswith('-entries') for t in self._threads):close()

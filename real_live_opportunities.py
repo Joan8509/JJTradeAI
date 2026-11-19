@@ -26,12 +26,19 @@ ENTRY_ERROR_CODES=frozenset({
 
 def signal_identity(tick,first):
     from bollinger_phone_worker import canonical_candle
-    value=[tick['provider'],tick['feed'],tick['version'],tick['symbol'],
+    # Tightening opening membership must not create a second order identity
+    # for a v7 signal already attempted in this candle. Keep its original clock.
+    version = ('v7_ruptura_temprana_30s'
+               if tick['version'] in ('v8_apertura_dentro_bandas_previas', 'v9_primera_estrategia_completa_30s')
+               else tick['version'])
+    value=[tick['provider'],tick['feed'],version,tick['symbol'],
            canonical_candle(tick['signal']['candle']),tick['signal']['side'],aware(first).isoformat()]
     return 'REAL:'+sha256(json.dumps(value,separators=(',',':')).encode()).hexdigest()
 
 
 class RealOpportunities:
+    selected_revalidation_revision=1
+
     def __init__(self,market,capital,*,clock=lambda:datetime.now(timezone.utc),signal_reader=None,monotonic=time.monotonic,evidence_recorder=None):
         self.market=market;self.capital=capital;self.clock=clock
         if signal_reader is None:
@@ -177,7 +184,7 @@ class RealOpportunities:
         state,latest,_=self.reader._signal(row['symbol'])
         if signal_identity(latest,datetime.fromisoformat(state['detector_first_at']))!=key:return None
         # Revalidate the same contract against detector and broker spots after HTTP.
-        _,_,eligible=manual_candidates(state,market,row['symbol'],side,aware(self.clock()))
+        _,_,eligible=manual_candidates(state,market,row['symbol'],side,aware(self.clock()),contract_symbol=q.symbol)
         if not any(c.snapshot.symbol==q.symbol for c in eligible):return None
         if not self.capital.entry_ready():return None
         self._signals[key]=row['symbol'];self._quotes[q.symbol]=contract

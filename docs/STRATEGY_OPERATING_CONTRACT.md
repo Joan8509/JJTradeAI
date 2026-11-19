@@ -1,5 +1,37 @@
 # Reglas estables de JJTrade AI
 
+Refuerzo17/11/2026 de salida STOP20%: limpieza atomica de ventas propias
+PREPARED vencidas/sin enviar, prioridad del stop sobre objetivo no enviado y
+cancelacion de objetivo aceptado tras STOP persistido aun sin nueva quote.
+Venta nueva requiere Bid valido y cantidad propia libre/confirmada. Esperas
+prolongadas o inciertas del stop generan revision/aviso, sin reenviar POST
+inciertos ni liberar reservas de envios posibles. No cambia umbral20%, objetivo,
+V9 de entrada ni primera entrada. Sigue STOP local, no nativo. Detalle
+REAL_STOP_REINFORCEMENT.md; carga efectiva en CURRENT_CONTEXT.
+
+Actualizacion17/11/2026, autorizacion expresa "activala, me gusta esa mejora":
+V9 cuenta el plazo maximo30s desde la PRIMERA estrategia COMPLETA por
+feed/alcance/simbolo/vela/lado. Intenta entrar inmediatamente; no espera30s.
+Sustituye el vencimiento desde primer cruce autorizado06Nov, conservado abajo
+como historia. El primer cruce queda como evidencia, no como veto temporal.
+El reloj completo se persiste junto con la senal antes del despertarIPC y no
+se renueva por retraccion, pausa o reconexion. Sin evidencia no se inventa.
+Se conservan apertura dentro de bandas previas/iniciales/actuales,3% por cada
+banda, precio fuera/direccion/media, frescura3s, contratos, fondos, preview,
+dedup y primera entrada; objetivos y stop20% sin cambios. Version
+v9_primera_estrategia_completa_30s. Carga efectiva solo en CURRENT_CONTEXT;
+detalle STRATEGY_COMPLETE_CLOCK_PREPARED_2026-11-17.md.
+
+Actualizacion17/11/2026: el usuario confirma que la apertura debe quedar dentro
+de las bandas de la vela ANTERIOR, antes de recalcularlas con la vela nueva.
+Version v8_apertura_dentro_bandas_previas. Abrir fuera invalida toda esa vela,
+aunque despues reentre y salga o se ensanchen las bandas. Se conservan tambien
+los controles de bandas iniciales/actuales, 3% por cada banda, direccion/media,
+precio fuera, relojes originales30s y frescura3s. Sin espera de cierre ni red
+adicional. Sustituye la suficiencia de referencia inicial06/11 descrita abajo.
+No renueva eventos, avisos, identidad REAL v7 ni armado. Detalle en
+STRATEGY_PREVIOUS_OPENING_2026-11-17.md; carga efectiva en CURRENT_CONTEXT.
+
 13/11/2026: preparación REAL de catálogos ampliada a la sesión de la cola,
 incluida recuperación de autorización de datos. Solo compañías ARMED, hilo
 separado y metadata; conserva cotizaciones, preview, fondos y frescura originales.

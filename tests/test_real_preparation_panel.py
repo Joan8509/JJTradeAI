@@ -154,6 +154,38 @@ class RealPreparationPanelTests(TestCase):
         self.assertEqual(app.session_state['real_workspace_view'],'Cola real')
         self.assertEqual(app.dataframe[0].value.iloc[0]['Estado'],'Bajo el radar')
 
+    def test_already_active_preparation_shows_notice_and_queue_without_rearming(self):
+        app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
+        runtime=app.session_state['real_execution_runtime'];runtime.can_arm.return_value=True
+        app.multiselect(key='real_prep_symbols').set_value(['AMZN']).run()
+        app.selectbox(key='real_prep_common_target').select('10').run()
+        app.button(key='real_prep_apply').click().run()
+        runtime.queue.read.return_value=dict(id='EXISTING',paused=False,entry_consumed=False,entry_owner=None,
+            session_open='2099-01-01T14:30:00+00:00',session_close='2099-01-01T21:00:00+00:00',
+            rows=[dict(id='AMZN',symbol='AMZN',quantity=1,target='10',state='ARMED')])
+        client=app.session_state['test_client'];calls=list(client.method_calls)
+        app.button(key='real_prep_activate').click().run()
+        self.assertEqual(len(app.exception),0)
+        self.assertEqual(app.session_state['real_workspace_view'],'Cola real')
+        self.assertTrue(any('Compañías activas esperando estrategia' in x.value for x in app.success))
+        runtime.arm.assert_not_called();runtime.resume.assert_not_called()
+        self.assertIsNone(app.session_state['real_preparation_service'].preparation)
+        self.assertEqual(client.method_calls,calls)
+
+    def test_different_preparation_displays_existing_queue_without_applying_changes(self):
+        app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
+        runtime=app.session_state['real_execution_runtime'];runtime.can_arm.return_value=True
+        app.multiselect(key='real_prep_symbols').set_value(['AMZN']).run()
+        runtime.queue.read.return_value=dict(id='EXISTING',paused=False,entry_consumed=False,entry_owner=None,
+            session_open='2099-01-01T14:30:00+00:00',session_close='2099-01-01T21:00:00+00:00',
+            rows=[dict(id='QQQ',symbol='QQQ',quantity=1,target='20',state='ARMED')])
+        app.button(key='real_prep_activate').click().run()
+        self.assertEqual(len(app.exception),0)
+        self.assertEqual(app.session_state['real_workspace_view'],'Cola real')
+        self.assertTrue(any('no se han aplicado' in x.value for x in app.success))
+        runtime.arm.assert_not_called();runtime.resume.assert_not_called()
+        self.assertIsNone(app.session_state['real_preparation_service'].preparation)
+
     def test_option_reauthorization_problem_is_visible_without_arming(self):
         app=AppTest.from_function(page,default_timeout=20).run(timeout=20)
         runtime=app.session_state['real_execution_runtime']

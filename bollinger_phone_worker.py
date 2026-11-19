@@ -29,7 +29,7 @@ _NOTICE_BAND_CACHE = NoticeBandCache()
 
 POLICY_PATH = CONFIG_PATH.parent / "bollinger_policy.json"
 STATUS_PATH = CONFIG_PATH.parent / "radar_status.json"
-STRATEGY_VERSION = "v7_ruptura_temprana_30s"
+STRATEGY_VERSION = "v9_primera_estrategia_completa_30s"
 # Stable event identity across the authorized opening interpretation update.
 # Payload version changes; existing events and notification claims never replay.
 EVENT_KEY_VERSION = "v4_apertura_dentro_sin_veto_previo"
@@ -144,14 +144,17 @@ def opening_bands_from_moments(close, upper, lower, mid, opening):
 
 
 def detect_values(previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid, *, opening=None, opening_upper=None, opening_lower=None):
-    """Shared v6 rule: a candle already outside at its opening is excluded.
+    """Shared opening rule clarified by the user on 17/11.
 
-    Explicit user correction06/11 supersedes dynamic membership26/10. Preserve
-    current-band membership too; no previous-close veto or candle-close wait.
+    The official open must be inside the previous completed candle's bands,
+    before the new candle can widen them. Keep initial/current membership too;
+    no previous-close veto, new history request or candle-close wait.
     """
     if not all(math.isfinite(float(value)) for value in (previous_close, previous_upper, previous_lower, previous_mid, close, upper, lower, mid)):
         return None
     if opening is None or not math.isfinite(float(opening)):
+        return None
+    if not previous_lower <= opening <= previous_upper:
         return None
     if not lower <= opening <= upper:
         return None
@@ -424,7 +427,7 @@ def tick(database=DEFAULT_MARKET_DATABASE, *, as_of=None, sender=send_message, s
                      "source_timestamp": source_time.isoformat(), "source_kind":source_kind,
                      "detected_at": detected_time.isoformat(), "version": STRATEGY_VERSION, "opening": opening}
             keys = candle_keys(f"{EVENT_KEY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])
-            keys = tuple(dict.fromkeys(keys+candle_keys(f"v5_apertura_dentro_bandas_actuales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"v6_apertura_dentro_bandas_iniciales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])))
+            keys = tuple(dict.fromkeys(keys+candle_keys(f"v5_apertura_dentro_bandas_actuales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"v6_apertura_dentro_bandas_iniciales|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"v7_ruptura_temprana_30s|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"v8_apertura_dentro_bandas_previas|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])+candle_keys(f"{STRATEGY_VERSION}|{provider}|{feed}|{symbol}", signal['candle'], signal['side'])))
             existing = db.execute(f"SELECT event_key FROM bollinger_live_events WHERE event_key IN ({','.join('?' for _ in keys)}) ORDER BY detected_at LIMIT 1", keys).fetchone()
             event_key = existing[0] if existing else keys[0]
             if existing is None:
@@ -632,6 +635,7 @@ def main():
         except Exception:
             status = {"state": "ERROR", "error": "No se pudo completar la revisión. Revisa los datos y la conexión."}
         status.update({"heartbeat": datetime.now(timezone.utc).isoformat(), "pid": os.getpid(),
+                       "strategy_version": STRATEGY_VERSION,
                        "notice_interval_revision": 1,"market_wakeup_revision":1,
                        "notice_bandwidth_revision":2,
                        "market_wakeup_native":signal_wakeup.native})

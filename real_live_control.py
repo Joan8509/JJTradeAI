@@ -2,6 +2,7 @@
 from datetime import datetime,timezone
 from pathlib import Path
 import sqlite3
+import time
 from contextlib import closing
 
 from schwab_connection import aware
@@ -58,18 +59,28 @@ def verified_preview_wire(binding):
     return 'PREVIEW_ORDER_STRATEGY_V1'
 
 
-def next_official_session(now,database=None):
+def next_official_session(now,database=None,*,timeout=1,query_budget=None):
     from market_store import DEFAULT_MARKET_DATABASE
     from zoneinfo import ZoneInfo
     database=Path(database or DEFAULT_MARKET_DATABASE)
     today=aware(now).astimezone(ZoneInfo('America/New_York')).date().isoformat()
-    with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro',uri=True,timeout=1)) as db:
+    with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro',uri=True,timeout=timeout)) as db:
+        deadline=time.monotonic()+query_budget if query_budget is not None else None
+        if deadline is not None:db.set_progress_handler(lambda:int(time.monotonic()>=deadline),100)
         db.execute('PRAGMA query_only=ON')
         rows=db.execute('SELECT opens_at,closes_at FROM market_sessions WHERE session_date>=? ORDER BY session_date LIMIT 10',(today,)).fetchall()
     for start,end in rows:
         start,end=aware(datetime.fromisoformat(start)),aware(datetime.fromisoformat(end))
         if start<end and end>aware(now):return start,end
     raise ValueError('OFFICIAL_SESSION_UNAVAILABLE')
+
+
+def exit_official_session(now,database=None):
+    """Fresh calendar with short SQL/lock budget; no stale success on failure.
+
+    OS scheduling and filesystem delays are outside SQLite's execution budget.
+    """
+    return next_official_session(now,database,timeout=.05,query_budget=.05)
 
 
 class RealRuntimeProxy:
@@ -79,14 +90,24 @@ class RealRuntimeProxy:
         self.binding=binding;self.queue=queue or RealAutomaticQueue();self.status_factory=status_factory
         self.control_factory=control_factory;self.clock=clock;self.session_provider=session_provider
 
-    def status(self):
+    def _status(self,*,display_only=False):
         try:
             store=self.status_factory()
-            with store.locked():status=store.load()
+            if display_only:
+                from real_live_storage import load_display_document
+                status=load_display_document(store)
+            else:
+                with store.locked():status=store.load()
             age=(aware(self.clock())-aware(datetime.fromisoformat(status['checked_at']))).total_seconds()
             if status.get('binding')!=self.binding or not 0<=age<5:raise ValueError
             return status
         except Exception:return dict(ready_to_arm=False,blockers=['LIVE_HOST_NOT_CURRENT'])
+
+    def status(self):return self._status()
+
+    def display_status(self):
+        """Fresh atomically published status for UI, never grants an order."""
+        return self._status(display_only=True)
 
     def can_arm(self):return self.status().get('ready_to_arm') is True
 
@@ -118,7 +139,11 @@ class RealRuntimeProxy:
 
     def positions(self):
         from real_order_ledger import RealOrderLedger
-        rows=RealOrderLedger().requests(self.binding);positions=[]
+        return self._positions(RealOrderLedger().requests(self.binding))
+
+    @staticmethod
+    def _positions(rows):
+        positions=[]
         for buy in rows:
             if buy['instruction']!='BUY_TO_OPEN' or not buy['fills']:continue
             bought=sum(f['quantity'] for f in buy['fills'].values())
@@ -133,8 +158,18 @@ class RealRuntimeProxy:
 
     def trade_history(self):
         from real_order_ledger import RealOrderLedger
+        return self._trade_history(RealOrderLedger().requests(self.binding))
+
+    def display_positions(self):
+        """One current read per display, never cached or used to grant orders."""
+        from real_order_ledger import RealOrderLedger
+        rows=RealOrderLedger().display_requests(self.binding)
+        return self._positions(rows),self._trade_history(rows)
+
+    @staticmethod
+    def _trade_history(rows):
         from schwab_contracts import decimal
-        rows=RealOrderLedger().requests(self.binding);result=[]
+        result=[]
         for buy in rows:
             if buy['instruction']!='BUY_TO_OPEN' or not buy['fills']:continue
             bought=sum(f['quantity'] for f in buy['fills'].values())

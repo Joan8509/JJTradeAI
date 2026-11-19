@@ -48,19 +48,19 @@ def render_operating_mode(render_brand):
 
     st.subheader('¿Cómo quieres operar?')
     st.caption('Elige tu espacio de trabajo.')
-    left, right = st.columns(2, gap='medium')
+    left, middle = st.columns(2, gap='medium')
     with left:
-        with st.container(border=True):
-            st.markdown('### Operar en Real')
-            st.write('Tu espacio para operar con tu cuenta Schwab.')
-            st.caption('Cuenta Schwab · Cola automática real')
-            st.button('Operar en Real', key='jj_select_real',
-                      on_click=_choose, args=('real',), width='stretch')
-    with right:
         with st.container(border=True):
             st.markdown('### Operar en Simulación')
             st.write('Practica con el dashboard que ya tienes preparado.')
             st.caption('Simulación local · Sin utilizar dinero real')
             st.button('Operar en Simulación', key='jj_select_simulation', type='primary',
                       on_click=_choose, args=('simulacion',), width='stretch')
+    with middle:
+        with st.container(border=True):
+            st.markdown('### Operar en Real')
+            st.write('Tu espacio para operar con tu cuenta Schwab.')
+            st.caption('Cuenta Schwab · Cola automática real')
+            st.button('Operar en Real', key='jj_select_real',
+                      on_click=_choose, args=('real',), width='stretch')
     return False

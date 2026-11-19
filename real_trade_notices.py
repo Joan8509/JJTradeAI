@@ -44,7 +44,8 @@ def format_execution(event,rows):
             'Las otras entradas están bloqueadas. No se repetirá la compra.'))
     if event.get('kind')=='EXIT_REVIEW':
         return '\n'.join(('SALIDA REAL REQUIERE ATENCIÓN · '+symbol+' '+side,
-            'La venta aún no está confirmada; revisa posición y órdenes en Schwab.',
+            ('Stop del 20% activado. La venta aún no está confirmada.' if event.get('reason')=='STOP' else
+             'La venta aún no está confirmada; revisa posición y órdenes en Schwab.'),
             stamp+' · La app está comprobando la salida y las cantidades disponibles.',
             'No se repetirá una orden cuyo envío o ejecución sean inciertos.'))
     if event.get('kind') in ('EXTERNAL_CLOSE_DETECTED','EXTERNAL_CLOSE_REVIEW'):
@@ -157,7 +158,7 @@ class RealTradeNotices:
                     if r.get('parent_id')==parent['id'] for f in r['fills'].values()):continue
             key=sha256((self.binding+'\0'+parent['id']+'\0EXIT_REVIEW\0'+state).encode()).hexdigest()
             events.append(dict(kind='EXIT_REVIEW',key=key,request=parent['id'],contract=contract,
-                quantity=sum(f['quantity'] for f in parent['fills'].values()),at=status['checked_at']))
+                quantity=sum(f['quantity'] for f in parent['fills'].values()),at=status['checked_at'],reason=status.get('reason')))
         for contract,status in self.target_status_provider().items():
             if not status.get('error'):continue
             parent=next((r for r in rows if r['id']==status.get('parent_id')),None)

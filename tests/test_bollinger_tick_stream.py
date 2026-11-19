@@ -146,7 +146,20 @@ class TickGeometryTests(unittest.TestCase):
         self.assertEqual(snapshot['opening'],104.)
         self.assertGreater(g['opening'],g['initial_opening_upper'])
         self.assertLessEqual(g['opening'],g['upper'])
-        self.assertEqual(g['opening_reference'],'INITIAL_AND_CURRENT_BANDS')
+        self.assertEqual(g['opening_reference'],'PREVIOUS_INITIAL_AND_CURRENT_BANDS')
+
+    def test_opening_outside_previous_bands_stays_excluded_even_inside_recalculated_bands(self):
+        for opening,price in ((102.,104.),(98.,96.)):
+            with self.subTest(opening=opening):
+                self.geometry.status('CONECTADO',CANDLE-timedelta(seconds=1))
+                self.observe(opening,1,301 if opening==102. else 401)
+                snapshot,reason=self.observe(price,2,302 if opening==102. else 402)
+                g=snapshot['geometry']
+                self.assertTrue(opening>g['previous_upper'] or opening<g['previous_lower'])
+                self.assertLessEqual(g['initial_opening_lower'],opening)
+                self.assertLessEqual(opening,g['initial_opening_upper'])
+                self.assertEqual(reason,'READY_NO_EXIT')
+                self.assertIsNone(snapshot['signal'])
 
     def test_previous_exposure_allows_only_new_inside_opening(self):
         for previous,price,side in ((103.,105.,'SUPERIOR'),(97.,95.,'INFERIOR')):
@@ -165,7 +178,7 @@ class TickGeometryTests(unittest.TestCase):
         self.store.upsert_bar(MarketBar('AAPL',CANDLE,100,105,99,102,100),provider='ALPACA',feed='iex')
         snapshot,reason=self.observe(104.,62,2)
         self.assertEqual(snapshot['opening'],100)
-        self.assertEqual(reason,'BREAKOUT_CLOCK_UNAVAILABLE')
+        self.assertEqual(reason,'STRATEGY_CLOCK_UNAVAILABLE')
         self.assertIsNone(snapshot['signal'])
 
     def test_missed_or_earlier_out_of_order_opening_waits_for_official_bar(self):

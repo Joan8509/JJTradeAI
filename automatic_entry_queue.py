@@ -499,7 +499,7 @@ class QueueRunner:
         cross_deadline=breakout_deadline(tick['signal'],now)
         if cross_deadline is not None:
             deadline=min(deadline,cross_deadline)
-            first=min(first,datetime.fromisoformat(tick['signal']['first_breakout_at']))
+            first=min(first,datetime.fromisoformat(tick['signal'].get('first_strategy_at') or tick['signal']['first_breakout_at']))
         result=dict(signal,first_signal_at=first.isoformat(),signal_deadline=deadline.isoformat())
         try:
             from entry_band_comparison import compare_snapshot

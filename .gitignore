@@ -74,3 +74,5 @@ docs/VPS*.md
 docs/PC_*.md
 vps_update_manifest.json
 *.before_fix
+# Paper paired-options observations and virtual results stay local.
+exports/paired_paper/

@@ -32,3 +32,12 @@ no demuestra por sí sola un ahorro específico en la ejecución futura de Schwa
 Código: real_entry_signal_hints.py, real_automatic_queue.py,
 real_execution_runtime.py y real_execution_host.py. Pruebas aisladas y estado
 de carga efectivo en CURRENT_CONTEXT y diario del 13/11/2026.
+
+17/11/2026: el notificador local despierta tambien si una senal publicada se
+retrae y vuelve a ser EXIT en la misma vela/lado. Antes despertaba solo la
+primera vez de esa clave y dependia despues del respaldo200ms. Una senal que
+permanece EXIT no genera avisos internos por cada tick. La publicacion SQLite
+confirmada sigue siendo previa al despertar; no se renuevan relojes ni dedup
+de avisos/ordenes. Solo adelanta la revalidacion completa de los ejecutores.
+Revision interna committed_market_signal_wakeup_v2; nombre Win32 conservado
+para interoperar con procesos existentes. Carga efectiva en CURRENT_CONTEXT.

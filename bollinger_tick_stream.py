@@ -142,6 +142,10 @@ class TickRepository:
                     candle TEXT NOT NULL, side TEXT NOT NULL, first_at TEXT NOT NULL,
                     PRIMARY KEY(feed,scope,symbol,candle,side));
             ''')
+            db.execute('CREATE TABLE IF NOT EXISTS bollinger_full_strategy_clock ('
+                'feed TEXT NOT NULL,scope TEXT NOT NULL,symbol TEXT NOT NULL,'
+                'candle TEXT NOT NULL,side TEXT NOT NULL,first_at TEXT NOT NULL,'
+                'PRIMARY KEY(feed,scope,symbol,candle,side))')
             db.execute(FIRST_EXIT_INDEX_SQL)
             # Rolling, private raw evidence; cap time retention on each restart.
             db.execute('DELETE FROM bollinger_tick_audit WHERE received_at < ?',
@@ -183,6 +187,15 @@ class TickRepository:
                 'first_at=excluded.first_at WHERE excluded.first_at<bollinger_breakout_clock.first_at',clocks)
 
 
+            complete=[]
+            for symbol,p in snapshots.items():
+                for side,first in p.get('strategy_firsts',{}).items():
+                    complete.append((feed,p['reference_scope'],symbol,p['candle'],side,first))
+            db.executemany('INSERT INTO bollinger_full_strategy_clock VALUES(?,?,?,?,?,?) '
+                'ON CONFLICT(feed,scope,symbol,candle,side) DO UPDATE SET '
+                'first_at=excluded.first_at WHERE excluded.first_at<bollinger_full_strategy_clock.first_at',complete)
+
+
 class TickGeometry:
     """O(20) geometry per eligible trade; history loads only on candle changes."""
     def __init__(self, database, feed, *, now=None, reference_scope=None):
@@ -199,6 +212,7 @@ class TickGeometry:
         self.session_key = self.session = None
         self.reference_windows = {}
         self.breakout_memories = OrderedDict()
+        self.strategy_memories = OrderedDict()
 
     def bar_affects_reference(self,bar,candle):
         if bar.timestamp==candle:return True
@@ -326,14 +340,19 @@ class TickGeometry:
                 state['retry_at'] = now+timedelta(seconds=1)
             if 'breakout_firsts' not in state and not references_pending:
                 clock_key=(symbol,candle)
-                if clock_key not in self.breakout_memories:
+                if clock_key not in self.breakout_memories or clock_key not in self.strategy_memories:
                     with closing(sqlite3.connect(Path(self.database).resolve().as_uri()+'?mode=ro',uri=True,timeout=.025)) as db:
+                        key=(self.feed,self.reference_scope,symbol,candle.astimezone(UTC).isoformat())
                         rows=db.execute('SELECT side,first_at FROM bollinger_breakout_clock '
-                            'WHERE feed=? AND scope=? AND symbol=? AND candle=?',
-                            (self.feed,self.reference_scope,symbol,candle.astimezone(UTC).isoformat())).fetchall()
-                    self.breakout_memories[clock_key]=dict(rows)
+                            'WHERE feed=? AND scope=? AND symbol=? AND candle=?',key).fetchall()
+                        complete=db.execute('SELECT side,first_at FROM bollinger_full_strategy_clock '
+                            'WHERE feed=? AND scope=? AND symbol=? AND candle=?',key).fetchall()
+                    self.breakout_memories.setdefault(clock_key,dict(rows))
+                    self.strategy_memories.setdefault(clock_key,dict(complete))
                     if len(self.breakout_memories)>512:self.breakout_memories.popitem(last=False)
+                    if len(self.strategy_memories)>512:self.strategy_memories.popitem(last=False)
                 state['breakout_firsts']=self.breakout_memories[clock_key]
+                state['strategy_firsts']=self.strategy_memories[clock_key]
             if not references_pending and state['opening'] is None and now >= state['open_retry_at']:
                 # Mid-candle startup/reconnection: recover the real opening
                 # from the completed FIRST minute, never the first price seen.
@@ -365,21 +384,28 @@ class TickGeometry:
                     'mid': (sum(prior[1:])+price)/20, 'previous_mid': sum(prior)/20,
                     'opening_upper': upper, 'opening_lower': lower,
                     'initial_opening_upper': initial_upper, 'initial_opening_lower': initial_lower,
-                    'opening_reference': 'INITIAL_AND_CURRENT_BANDS',
+                    'opening_reference': 'PREVIOUS_INITIAL_AND_CURRENT_BANDS',
                     'opening': state['opening'], 'price': price, 'side': side}
                 crossing = observe_breakout(state['breakout_firsts'],price,upper,lower,stamp,
                     allow_new=self.connected_at<=candle and (symbol,candle) not in self.missed_openings)
                 geometry['breakout_clock'] = crossing
-                if side and (crossing is None or not crossing['current']):
+                complete=None
+                if side and crossing is not None:
+                    complete=observe_breakout(state['strategy_firsts'],price,upper,lower,stamp,
+                        allow_new=self.connected_at<=candle and (symbol,candle) not in self.missed_openings)
+                geometry['strategy_clock']=complete
+                if side and (crossing is None or complete is None or not complete['current']):
                     side=None
                     geometry['side']=None
-                    reason='BREAKOUT_ENTRY_WINDOW_EXPIRED' if crossing else 'BREAKOUT_CLOCK_UNAVAILABLE'
+                    reason=('STRATEGY_ENTRY_WINDOW_EXPIRED' if complete else 'STRATEGY_CLOCK_UNAVAILABLE')
                 if side:
                     exposure = (price-upper if side == 'SUPERIOR' else lower-price)/(upper-lower)*100
                     signal = {'side': side, 'price': price, 'candle': candle.isoformat(),
                               'band_expansion': expansion_evidence(upper, lower, prev_upper, prev_lower),
                               'first_breakout_at':crossing['first_at'],
                               'breakout_deadline':crossing['deadline'],
+                              'first_strategy_at':complete['first_at'],
+                              'strategy_deadline':complete['deadline'],
                               'exposure_pct_bandwidth': exposure, 'small_exposure': exposure < 1}
                     reason = 'EXIT'
             # History/SQLite work can consume time after the first age check.
@@ -394,6 +420,7 @@ class TickGeometry:
                     'reference_scope': self.reference_scope,
                     'candle':candle.astimezone(UTC).isoformat(),
                     'breakout_firsts':dict(state.get('breakout_firsts',{})),
+                    'strategy_firsts':dict(state.get('strategy_firsts',{})),
                     'trade_id': message['i'], 'trade_timestamp_raw': message['t'],
                     'signal': signal, 'reason': reason, 'geometry': geometry}, reason
         except sqlite3.OperationalError:

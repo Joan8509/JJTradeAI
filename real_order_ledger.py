@@ -12,10 +12,12 @@ import re,secrets
 
 from schwab_connection import aware
 from real_live_storage import RealEncryptedStore as EncryptedSchwabStore
+from real_live_storage import load_display_document
 from schwab_contracts import decimal,positive_int
 from schwab_reconciliation import normalize_order
 
 PURPOSE='REAL_ORDER_JOURNAL_V1'
+JOURNAL_CHANGE_ONLY_REVISION=1
 TERMINAL={'FILLED','CANCELED','REJECTED','EXPIRED'}
 UNCERTAIN={'SUBMITTING','UNCERTAIN','CANCEL_SUBMITTING','CANCEL_UNCERTAIN','RECONCILIATION_REQUIRED'}
 
@@ -38,14 +40,14 @@ class RealOrderLedger:
         self.store_factory=store_factory;self.clock=clock
 
     @contextmanager
-    def _document(self,*,write=False):
+    def _document(self,*,write=False,should_save=None):
         store=self.store_factory()
         with store.locked():
             doc=store.load() if store.path.exists() else dict(purpose=PURPOSE,requests={},events=[])
             if doc.get('purpose')!=PURPOSE or not isinstance(doc.get('requests'),dict) or not isinstance(doc.get('events'),list):
                 raise RealOrderBlocked('ORDER_JOURNAL_INVALID')
             yield doc
-            if write:store.save(doc)
+            if write and (should_save is None or should_save()):store.save(doc)
 
     def _event(self,doc,row,state):
         row['state']=state;row['updated_at']=aware(self.clock()).isoformat()
@@ -61,6 +63,20 @@ class RealOrderLedger:
         _key(binding)
         with self._document() as doc:
             return deepcopy([r for r in doc['requests'].values() if r['account']==binding])
+
+    def display_requests(self,binding):
+        """Fresh display-only snapshot of the atomically published ciphertext.
+
+        No writer mutex: the file is always replaced as one complete document.
+        Execution/reservations/reconciliation continue to use requests()/locked().
+        Owner, DPAPI and journal validation remain mandatory; no stale fallback.
+        """
+        _key(binding);store=self.store_factory()
+        try:doc=load_display_document(store)
+        except FileNotFoundError:doc=dict(purpose=PURPOSE,requests={},events=[])
+        if doc.get('purpose')!=PURPOSE or not isinstance(doc.get('requests'),dict) or not isinstance(doc.get('events'),list):
+            raise RealOrderBlocked('ORDER_JOURNAL_INVALID')
+        return deepcopy([r for r in doc['requests'].values() if r['account']==binding])
 
     @staticmethod
     def _available(doc,binding,contract):
@@ -353,11 +369,16 @@ class RealOrderLedger:
             return deepcopy(row)
 
     def _reconcile_evidence(self,binding,identity,evidence,mode):
-        with self._document(write=True) as doc:
+        # Read and validate each fresh response under the same durable lock.
+        # Repeated identical observations must not encrypt/replace the entire
+        # journal or append another event; monitor heartbeats track polling.
+        changed=False
+        with self._document(write=True,should_save=lambda:changed) as doc:
             row=self._row(doc,binding,identity)
             if not row['broker_id'] or (evidence.broker_id,evidence.contract,evidence.instruction,evidence.quantity)!=(
                 row['broker_id'],row['contract'],row['instruction'],row['quantity']):
                 raise RealOrderBlocked('BROKER_ORDER_IDENTITY_MISMATCH')
+            previous=deepcopy(row)
             prior=row['fills'];incoming={}
             issues=list(evidence.issues)
             if row.get('evidence_mode',mode)!=mode:issues.append('EXECUTION_EVIDENCE_MODE_CHANGED')
@@ -375,7 +396,7 @@ class RealOrderLedger:
             if row.get('terminal_state') and evidence.status!=row['terminal_state']:issues.append('TERMINAL_STATE_CHANGED')
             row['issues']=sorted(set(issues))
             if issues:
-                self._event(doc,row,'RECONCILIATION_REQUIRED')
+                status='RECONCILIATION_REQUIRED'
             else:
                 row['fills']=incoming
                 row['evidence_mode']=mode
@@ -384,7 +405,8 @@ class RealOrderLedger:
                 if row.get('cancel_requested') and status not in TERMINAL:
                     status=('CANCEL_SUBMITTING' if row['state']=='CANCEL_SUBMITTING' else
                         'PENDING_CANCEL' if row.get('cancel_accepted') is True else 'CANCEL_UNCERTAIN')
-                self._event(doc,row,status)
+            changed=row!=previous or status!=previous['state']
+            if changed:self._event(doc,row,status)
             return deepcopy(row)
 
     def begin_cancel(self,binding,identity):

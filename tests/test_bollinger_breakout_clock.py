@@ -44,19 +44,20 @@ class BreakoutClockTests(TestCase):
                 elif weak is not None:return weak,price
         self.fail('No test prices')
 
-    def test_late_three_percent_is_not_a_new_opportunity(self):
+    def test_first_complete_strategy_remains_new_after_earlier_raw_cross(self):
         h=self.harness();weak,strong=self.weak_and_strong(h)
         first,reason=h.observe(weak,2,2);self.assertIsNone(first['signal'])
         late,reason=h.observe(strong,33,3)
-        self.assertEqual(reason,'BREAKOUT_ENTRY_WINDOW_EXPIRED');self.assertIsNone(late['signal'])
+        self.assertEqual(reason,'EXIT');self.assertIsNotNone(late['signal'])
+        self.assertEqual(late['signal']['first_strategy_at'],(CANDLE+timedelta(seconds=33)).isoformat())
         self.assertEqual(late['breakout_firsts']['SUPERIOR'],(CANDLE+timedelta(seconds=2)).isoformat())
 
     def test_early_three_percent_remains_immediate_and_survives_retraction(self):
         h=self.harness();weak,strong=self.weak_and_strong(h)
         h.observe(weak,2,2);early,reason=h.observe(strong,3,3)
         self.assertEqual(reason,'EXIT');self.assertEqual(early['signal']['first_breakout_at'],(CANDLE+timedelta(seconds=2)).isoformat())
-        h.observe(100,20,4);late,reason=h.observe(strong,32,5)
-        self.assertEqual(reason,'BREAKOUT_ENTRY_WINDOW_EXPIRED')
+        h.observe(100,20,4);late,reason=h.observe(strong,33,5)
+        self.assertEqual(reason,'STRATEGY_ENTRY_WINDOW_EXPIRED')
 
     def test_async_persist_and_process_recreation_keep_original_clock(self):
         h=self.harness();weak,strong=self.weak_and_strong(h)
@@ -67,14 +68,15 @@ class BreakoutClockTests(TestCase):
         h.geometry=TickGeometry(h.database,'iex',now=lambda:h.now)
         h.geometry.status('CONECTADO',CANDLE-timedelta(seconds=1))
         h.observe(100,39,4);s,reason=h.observe(strong,40,5)
-        self.assertEqual(reason,'BREAKOUT_ENTRY_WINDOW_EXPIRED')
+        self.assertEqual(reason,'STRATEGY_ENTRY_WINDOW_EXPIRED')
         self.assertEqual(s['breakout_firsts']['SUPERIOR'],(CANDLE+timedelta(seconds=2)).isoformat())
 
     def test_reconnect_before_publisher_flush_does_not_renew_clock(self):
         h=self.harness();weak,strong=self.weak_and_strong(h)
         h.observe(weak,2,2);h.geometry.status('CONECTADO',CANDLE-timedelta(seconds=1))
         h.observe(100,39,4);s,reason=h.observe(strong,40,5)
-        self.assertEqual(reason,'BREAKOUT_ENTRY_WINDOW_EXPIRED')
+        self.assertEqual(reason,'EXIT')
+        self.assertEqual(s['signal']['first_strategy_at'],(CANDLE+timedelta(seconds=40)).isoformat())
 
     def test_simulation_and_shared_real_reader_reject_fresh_tick_with_old_breakout(self):
         from tests.test_manual_trade_service import state_fixture

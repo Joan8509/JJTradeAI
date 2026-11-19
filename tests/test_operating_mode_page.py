@@ -30,7 +30,7 @@ class OperatingModePageTests(unittest.TestCase):
         page = self.run_page()
         self.assertEqual(page.session_state['guard_calls'], 0)
         self.assertEqual([b.label for b in page.button],
-                         ['Operar en Real', 'Operar en Simulación'])
+                         ['Operar en Simulación', 'Operar en Real'])
         page.button(key='jj_select_simulation').click().run(timeout=25)
         self.assertEqual(len(page.exception), 0)
         self.assertEqual(page.query_params['modo'], 'simulacion')
@@ -56,6 +56,16 @@ class OperatingModePageTests(unittest.TestCase):
         self.assertEqual(page.query_params['resultados'], '1')
         self.assertEqual(page.query_params['modo'], 'simulacion')
         self.assertTrue(any(m.value == 'SIMULATION_DASHBOARD' for m in page.markdown))
+
+    def test_retired_paired_link_returns_home_without_broker_or_simulation(self):
+        from unittest.mock import patch
+        with patch('real_live_control.RealRuntimeProxy') as runtime, \
+             patch('real_automatic_queue.RealAutomaticQueue.arm') as arm:
+            page=self.run_page(modo='call-put',operar='AAPL',operaciones='1')
+            self.assertEqual(page.session_state['guard_calls'],0)
+            self.assertEqual([b.key for b in page.button],['jj_select_simulation','jj_select_real'])
+            self.assertFalse(any(m.value=='SIMULATION_DASHBOARD' for m in page.markdown))
+            runtime.assert_not_called();arm.assert_not_called()
 
     def test_real_overrides_operational_link_and_unknown_mode_returns_home(self):
         page = self.run_page(modo='real', operar='AAPL', operaciones='1')

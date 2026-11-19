@@ -100,6 +100,7 @@ def _queue_controls(runtime,plan,ready,visible,removable):
     st.caption('Pausar o quitar compañías solo detiene nuevas entradas. Las salidas de operaciones abiertas siguen activas.')
 
 
+@st.fragment
 def render_real_workspace():
     from real_activation_panel import render_real_activation_status
     render_real_activation_status()
@@ -130,10 +131,7 @@ def _render_real_view(view):
     if service.account_binding!=binding:
         service.preparation=None;service.last_result=None
     runtime=_runtime(binding)
-    try:connected=runtime is not None and runtime.binding==binding and runtime.can_arm()
-    except Exception:connected=False
-    st.info('Configuración de operaciones reales · Revisa el estado en «Cola real».' if connected else
-        'Preparación para operar en real · Elige y activa las compañías en «Preparar compañías».')
+    st.info('Configuración de operaciones reales · Revisa el estado en «Cola real».')
     if binding is None:
         st.caption('Consulta y selecciona tu cuenta para preparar las compañías de la cola real.')
         st.button('Consultar mi cuenta',on_click=_go_account,key='real_prep_go_account')
@@ -153,20 +151,23 @@ def _render_real_view(view):
 
 @st.fragment(run_every='2s')
 def _queue(service,reader,reference,binding):
+    selected=st.session_state.get('real_workspace_view')
+    if selected is not None and selected!='Cola real':return
     st.subheader('Compras automáticas reales')
     st.caption('Prepara tus compañías antes de la apertura. Solo la primera entrada válida podrá comprar; las demás quedarán fuera de esta cola. Stop del 20% y cierre manual.')
     st.caption('El contrato debe caber en tu efectivo liquidado, con la cantidad elegida y los costos informados. Los precios pueden cambiar al abrir.')
     st.caption('Los porcentajes se calculan sobre la prima. El resultado neto descontará las comisiones reales.')
     if binding is None:return
     runtime=_runtime(binding)
-    try:status=runtime.status()
+    display_status=callable(getattr(type(runtime),'display_status',None))
+    try:status=runtime.display_status() if display_status else runtime.status()
     except Exception:status={}
     last_blockers=_last_entry_blockers(status)
     # Only a server-owned runtime may be installed here. Loading a page, editing
     # rows or selecting Real never constructs a gateway or starts a worker.
     ready=False
     if runtime is not None and runtime.binding==binding:
-        try:ready=runtime.can_arm()
+        try:ready=status.get('ready_to_arm') is True if display_status else runtime.can_arm()
         except Exception:pass
     if not ready:
         st.warning('Esperando que el ejecutor confirme cuenta, fondos y previsualización. El estado se actualiza automáticamente.')
@@ -262,9 +263,18 @@ def _queue(service,reader,reference,binding):
                     for r in visible],hide_index=True,width='stretch')
             else:st.info('No hay compañías en espera de operar. Puedes activarlas desde «Preparar compañías».')
         else:st.info('No hay compañías activadas. Elige las compañías y pulsa «Activar preparación» en «Preparar compañías».')
-    if runtime is not None and hasattr(runtime,'positions'):
+    positions=[];history=[]
+    # A single fresh journal read supplies both displays. Never reuse this
+    # presentation snapshot for an activation, close command or authorization.
+    if runtime is not None and callable(getattr(type(runtime),'display_positions',None)):
+        try:positions,history=runtime.display_positions()
+        except Exception:pass
+    elif runtime is not None:
         try:positions=runtime.positions()
-        except Exception:positions=[]
+        except Exception:pass
+        try:history=runtime.trade_history()
+        except Exception:pass
+    if runtime is not None and hasattr(runtime,'positions'):
         if isinstance(positions,list) and positions:
             st.subheader('Mis posiciones reales de la app')
             for position in positions:
@@ -276,8 +286,6 @@ def _queue(service,reader,reference,binding):
                         st.success('Cierre solicitado al ejecutor. La posición se confirma cerrada cuando Schwab informa la ejecución.')
                     except Exception:st.error('No se pudo registrar el cierre. Revisa el estado de la cuenta y del ejecutor.')
     if runtime is not None and hasattr(runtime,'trade_history'):
-        try:history=runtime.trade_history()
-        except Exception:history=[]
         if isinstance(history,list) and history:
             st.subheader('Operaciones reales confirmadas por Schwab')
             st.dataframe([{'Contrato':r['contract'],'Compra confirmada':r['bought'],
@@ -355,11 +363,22 @@ def _editor(service,binding):
         try:
             if _account()[2]!=binding:raise ValueError('ACCOUNT_SELECTION_REQUIRED')
             plan=runtime.queue.read(binding)
+            if (plan and not plan.get('paused') and not plan.get('entry_consumed') and not plan.get('entry_owner')
+                    and datetime.now(timezone.utc)<datetime.fromisoformat(plan['session_close'])
+                    and any(r['state']=='ARMED' for r in plan['rows'])
+                    and not any(r['state'] in ('SUBMITTING','ORDER_SENT','REQUIRES_REVIEW') for r in plan['rows'])):
+                notice='Compañías activas esperando estrategia.'
+                active={r['symbol']:(r['quantity'],r['target']) for r in plan['rows'] if r['state']=='ARMED'}
+                if any(active.get(r['symbol'])!=(r['quantity'],r['target']) for r in payload):
+                    notice+=' Se conserva la cola vigente; los cambios de esta preparación no se han aplicado.'
+                st.session_state['real_queue_notice']=notice
+                st.session_state['real_workspace_next_view']='Cola real'
+                st.rerun()
             if plan and any(r['state'] not in ('PAUSED','EXPIRED','COMPLETED','EXCLUDED_FIRST_ENTRY','REMOVED') for r in plan['rows']):
                 raise ValueError('LIVE_QUEUE_ALREADY_EXISTS')
             saved=service.save(binding,payload)
             runtime.arm(saved['rows'],repeat_new_signals=False,first_entry_only=True)
-            st.session_state['real_queue_notice']='Preparación activada. Compañías bajo el radar para una sola entrada real.'
+            st.session_state['real_queue_notice']='Compañías activas esperando estrategia.'
             st.session_state['real_workspace_next_view']='Cola real'
             st.rerun()
         except PreparationError as error:

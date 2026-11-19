@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import json,re,secrets
 
 from schwab_connection import EncryptedSchwabStore,SchwabError,aware
+from real_live_storage import RealEncryptedStore
 
 ROOT=Path(__file__).resolve().parent
 TARGETS=('10','20','35','100','MANUAL')
@@ -16,7 +17,7 @@ PURPOSE='REAL_PREPARATION_ONLY_V1'
 class PreparationError(ValueError):pass
 
 
-class RealPreparationStore(EncryptedSchwabStore):
+class RealPreparationStore(RealEncryptedStore):
     def __init__(self):self.path=ROOT/'exports/private_runtime/real_preparation.dpapi'
 
 

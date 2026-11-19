@@ -102,8 +102,8 @@ class RealResultTests(TestCase):
                 self.assertEqual(result['counts']['review'],1);self.assertIsNone(result['gross_result'])
 
     def test_loading_reads_only_selected_account_once_without_a_broker(self):
-        ledger=Mock();ledger.requests.return_value=trade()
+        ledger=Mock();ledger.display_requests.return_value=trade()
         with patch('real_order_ledger.RealOrderLedger',return_value=ledger),patch(
                 'real_account_readonly.owner_account_client',side_effect=AssertionError('NO_BROKER')):
             self.assertEqual(load_operation_results('a'*64,now=NOW)['counts']['won'],1)
-        ledger.requests.assert_called_once_with('a'*64)
+        ledger.display_requests.assert_called_once_with('a'*64)

@@ -3,9 +3,14 @@ import streamlit as st
 
 
 def render_real_activation_status():
-    with st.expander('Activación de compras y ventas reales'):
+    details=st.expander('Activación de compras y ventas reales',key='real_activation_details',on_change='rerun')
+    if not details.open:return
+    with details:
         runtime=st.session_state.get('real_execution_runtime')
-        try:connected=runtime is not None and runtime.can_arm()
+        try:
+            if runtime is not None and callable(getattr(type(runtime),'display_status',None)):
+                connected=runtime.display_status().get('ready_to_arm') is True
+            else:connected=runtime is not None and runtime.can_arm()
         except Exception:connected=False
         if connected:st.info('Ejecutor real conectado. Activa tu selección desde «Preparar compañías» y síguela en «Cola real».')
         elif runtime is not None:st.warning('El ejecutor aún no confirma disponibilidad para armar compras. Revisa «Cola real».')

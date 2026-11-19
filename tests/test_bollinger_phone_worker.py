@@ -105,11 +105,11 @@ class BollingerPhoneTests(unittest.TestCase):
     def test_unknown_opening_cannot_authorize_notification(self):
         self.assertIsNone(detect_exit(self.frame().drop(columns="open")))
 
-    def test_opening_outside_old_band_can_develop_real_exit(self):
-        self.assertEqual(detect_values(100, 102, 98, 100, 104, 103, 97, 100.5,
-                         opening=102.1, opening_upper=102.3, opening_lower=97.8), 'SUPERIOR')
-        self.assertEqual(detect_values(100, 102, 98, 100, 96, 103, 97, 99.5,
-                         opening=97.9, opening_upper=102.2, opening_lower=97.7), 'INFERIOR')
+    def test_opening_outside_previous_band_remains_excluded_after_recalculation(self):
+        self.assertIsNone(detect_values(100, 102, 98, 100, 104, 103, 97, 100.5,
+                         opening=102.1, opening_upper=102.3, opening_lower=97.8))
+        self.assertIsNone(detect_values(100, 102, 98, 100, 96, 103, 97, 99.5,
+                         opening=97.9, opening_upper=102.2, opening_lower=97.7))
 
     def test_jump_still_outside_current_bands_remains_excluded(self):
         self.assertIsNone(detect_values(100, 102, 98, 100, 105, 104, 96, 100.5,

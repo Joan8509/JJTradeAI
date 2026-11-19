@@ -12,6 +12,8 @@ from schwab_connection import aware
 from schwab_contracts import decimal, price_on_tick
 from schwab_option_order_request import OptionLimitRequest, prepare_option_limit,prepare_observed_limit
 
+STOP_EXIT_RECOVERY_REVISION = 1
+
 
 class RealEntryNotDispatched(RealOrderBlocked):
     '''Raised only while preparing, before any order coordinator call.'''
@@ -186,9 +188,9 @@ class RealExecutionService:
         with self._lock:
             results=[]
             for row in self.ledger.requests(self.binding):
-                if (row.get('exit_role')=='BROKER_TARGET' and row['state']=='PREPARED'
+                if (row['instruction']=='SELL_TO_CLOSE' and row.get('parent_id') and row['state']=='PREPARED'
                         and aware(self.clock())>=aware(datetime.fromisoformat(row['expires_at']))):
-                    self.ledger.abandon_prepared(self.binding,row['id'])
+                    self._abandon_unsent_exit(row)
             for row in self.ledger.requests(self.binding):
                 if row['instruction']=='BUY_TO_OPEN' and row.get('exit_plan') and row['fills']:
                     try:
@@ -200,17 +202,21 @@ class RealExecutionService:
                         if not re.fullmatch('[A-Z_]{1,100}',code):
                             code='LIVE_STORAGE_LOCK_UNAVAILABLE' if isinstance(error,PermissionError) else 'LIVE_EXIT_CHECK_FAILED'
                         self.exit_observations[row['contract']]=dict(self.exit_observations.get(row['contract'],{}),
-                            checked_at=aware(self.clock()).isoformat(),state=code,parent_id=row['id'])
+                            checked_at=aware(self.clock()).isoformat(),state=code,parent_id=row['id'],
+                            reason=self.exit_observations.get(row['contract'],{}).get('reason',row.get('exit_trigger')))
                         results.append(dict(id=row['id'],state='LIVE_EXIT_REQUIRES_REVIEW',code=code))
             return results
 
+    def _abandon_unsent_exit(self,row):
+        # Atomic ledger state check competes with begin_submit. An order that
+        # crossed into SUBMITTING is never released or submitted a second time.
+        try:return self.ledger.abandon_prepared(self.binding,row['id'])
+        except RealOrderBlocked as error:
+            if str(error)!='REQUEST_MAY_HAVE_BEEN_DISPATCHED':raise
+            return next(r for r in self.ledger.requests(self.binding) if r['id']==row['id'])
+
     def _exit(self,buy):
         now=aware(self.clock());plan=buy['exit_plan']
-        end=aware(datetime.fromisoformat(plan['session_close']))
-        if self.exit_session_provider:
-            start,end=self.exit_session_provider(now)
-            if not aware(start)<=now<aware(end):return None
-        elif now>=end:return None
         rows=self.ledger.requests(self.binding)
         children=[r for r in rows if r.get('parent_id')==buy['id']]
         bought=sum(f['quantity'] for f in buy['fills'].values())
@@ -219,11 +225,25 @@ class RealExecutionService:
             if self.exit_observations.get(buy['contract'],{}).get('parent_id')==buy['id']:
                 self.exit_observations.pop(buy['contract'],None)
             return None
+        # Closed historical buys must not wait on the market calendar.
+        end=aware(datetime.fromisoformat(plan['session_close']))
+        if self.exit_session_provider:
+            start,end=self.exit_session_provider(now)
+            if not aware(start)<=now<aware(end):return None
+        elif now>=end:return None
         if buy.get('external_close_hold'):
             self.exit_observations[buy['contract']]=dict(checked_at=now.isoformat(),state='EXTERNAL_MANUAL_CLOSE_DETECTED')
             return None
         if self.exit_admission(buy['contract']) is not True:
             raise RealOrderBlocked('LIVE_EXTERNAL_CLOSE_REQUIRES_RECONCILIATION')
+        if buy.get('exit_trigger')=='STOP':
+            # A previously confirmed stop does not need another quote to
+            # retire its profit order. New sells still require a fresh Bid.
+            for row in children:
+                if row.get('exit_role')!='BROKER_TARGET':continue
+                if row['state']=='PREPARED':return self._abandon_unsent_exit(row)
+                if row['state'] in ('ACKNOWLEDGED','WORKING','PARTIALLY_FILLED'):
+                    return self.coordinator.cancel(self.binding,row['id'])
         contract=self.quote_contract(buy['contract']);contract.validate_identity()
         # The quote may have changed while the GET was in flight. Evaluate its
         # actual provider timestamp against the clock AFTER receiving it.
@@ -258,12 +278,18 @@ class RealExecutionService:
         # replace until a subsequent GET proves final fills and remaining size.
         if active:
             for row in active:
+                if reason=='STOP' and row['state']=='PREPARED' and row.get('exit_role')=='BROKER_TARGET':
+                    return self._abandon_unsent_exit(row)
                 lower_to_bid=(decimal(row['limit'])>bid and (reason in ('STOP','MANUAL') or
                     (reason=='TARGET' and row.get('exit_role')!='BROKER_TARGET' and bid>=cost*(1+decimal(plan['target'])/100))))
                 if (row['state'] in ('ACKNOWLEDGED','WORKING','PARTIALLY_FILLED') and
                         ((row.get('exit_role')!='BROKER_TARGET' and now>=aware(datetime.fromisoformat(row['expires_at']))) or
                          lower_to_bid)):
                     return self.coordinator.cancel(self.binding,row['id'])
+            if reason=='STOP' and any(r['state'] in ('SUBMITTING','UNCERTAIN','CANCEL_UNCERTAIN','RECONCILIATION_REQUIRED')
+                    or now-aware(datetime.fromisoformat(r['updated_at']))>=timedelta(seconds=5) for r in active):
+                self.exit_observations[buy['contract']].update(state='LIVE_STOP_EXIT_CONFIRMATION_PENDING')
+                return dict(id=buy['id'],state='LIVE_EXIT_REQUIRES_REVIEW',code='LIVE_STOP_EXIT_CONFIRMATION_PENDING')
             return None
         quantity=min(bought-sold,self.ledger.available_to_close(self.binding,buy['contract']))
         if quantity<=0:return None

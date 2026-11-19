@@ -36,6 +36,21 @@ def detector_first_source(db,database,tick,*,cache=None):
     # instants: normalize bounds AND cache identity before the indexed query.
     signal=tick['signal'];candle=aware(datetime.fromisoformat(signal['candle']))
     key=(str(database),tick['symbol'],candle.isoformat(),signal['side'],tick.get('version'))
+    if 'first_strategy_at' in signal or 'strategy_deadline' in signal:
+        # The first complete strategy is persisted with the projection before
+        # IPC wake-up. Point lookup; no audit scan, broker request or new clock.
+        try:
+            from bollinger_breakout_clock import breakout_deadline
+            breakout_deadline(signal,aware(datetime.fromisoformat(tick['source_timestamp'])))
+            row=db.execute('SELECT first_at FROM bollinger_full_strategy_clock '
+                'WHERE feed=? AND scope=? AND symbol=? AND candle=? AND side=?',
+                (tick['feed'],tick.get('reference_scope','REGULAR'),tick['symbol'],
+                 candle.isoformat(),signal['side'])).fetchone()
+            if row is None:return None
+            first=aware(datetime.fromisoformat(row[0]))
+            if first!=aware(datetime.fromisoformat(signal['first_strategy_at'])):return None
+            return first.isoformat()
+        except (KeyError,ValueError,TypeError,sqlite3.Error):return None
     if key in cache:return cache[key]
     oldest=db.execute('SELECT received_at FROM bollinger_tick_audit ORDER BY received_at LIMIT 1').fetchone()
     if not oldest or datetime.fromisoformat(oldest[0])>candle:return None
@@ -167,7 +182,7 @@ def decode_manual_chain(payload,symbol,side,now,*,verified_increments=None):
         raise ManualDataError('OPTION_CHAIN_INVALID') from None
 
 
-def manual_candidates(state,market,symbol,side,now):
+def manual_candidates(state,market,symbol,side,now,*,contract_symbol=None):
     tick=current_manual_signal(state,symbol,now)
     actual='CALL' if tick['signal']['side']=='SUPERIOR' else 'PUT'
     if side!=actual:raise ManualDataError('SIGNAL_DIRECTION_CHANGED')
@@ -176,13 +191,19 @@ def manual_candidates(state,market,symbol,side,now):
         raise ManualDataError('OPTION_CHAIN_NOT_CURRENT')
     try:
         expiry=select_entry_expiration(market.expirations,now)
-        quotes=entry_candidates([c.snapshot for c in market.chain.contracts],symbol=symbol,
+        # Final REAL admission only needs the contract already previewed. Keep
+        # the complete expiry calendar and strike inventory: narrowing quotes
+        # must never make a sixth OTM strike appear to be the first.
+        contracts=market.chain.contracts
+        if contract_symbol is not None:
+            contracts=tuple(c for c in contracts if c.snapshot.symbol==contract_symbol)
+        quotes=entry_candidates([c.snapshot for c in contracts],symbol=symbol,
             side=side,underlying_price=float(tick['signal']['price']),
             underlying_stamp=datetime.fromisoformat(tick['source_timestamp']),as_of=now,
             listed_expirations=market.expirations, strike_inventory=market.strike_inventory)
     except ValueError:
         raise ManualDataError('NO_ELIGIBLE_EXPIRATION_OR_RANGE') from None
-    by_symbol={c.snapshot.symbol:c for c in market.chain.contracts}
+    by_symbol={c.snapshot.symbol:c for c in contracts}
     return tick,expiry,tuple(by_symbol[q.symbol] for q in quotes)
 
 

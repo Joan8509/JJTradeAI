@@ -24,3 +24,20 @@ Benchmark sintetico local300pares alternando orden de ejecucion: mediana
 medicion de Schwab ni de entrada total; el ahorro real debe medirse por fases
 en la siguiente senal natural. El archivo de benchmark y resultados permanece
 privado bajo2026-11-16_entry_state. No se prueba comprando en cuenta real.
+
+## Revalidacion final del contrato elegido
+
+16/11: despues del preview, REAL limita la ultima seleccion al contrato exacto
+ya elegido. Conserva el calendario completo y TODO el inventario de strikes:
+filtrar las cotizaciones no convierte el sexto OTM en el primero. Relee la senal
+y comprueba direccion, precio actual, vigencia de cadena y quote, vencimiento,
+rango y spread con las mismas funciones. Si no esta o deja de cumplir, bloquea;
+no sustituye contrato ni reutiliza una admision previa. La busqueda inicial y
+la alternativa por fondos siguen evaluando todos los candidatos necesarios.
+Manual/SIM no pasan el nuevo parametro y conservan su recorrido anterior.
+
+Prueba sintetica de300pares/49contratos: mediana2.21285ms completa contra1.30205ms
+acotada. Ahorro local aproximado0.91ms, no tiempo total broker. Las pruebas de
+equivalencia incluyen sextoOTM con inventario completo, quote vieja, retraccion,
+contrato ausente, cadena vieja y direccion distinta. Estado cargado se identifica
+por entry_selected_revalidation_revision=1 y se registra en continuidad local.

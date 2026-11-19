@@ -8,7 +8,7 @@ from threading import Event
 import math
 import os
 
-REVISION = 'committed_market_signal_wakeup_v1'
+REVISION = 'committed_market_signal_wakeup_v2'
 ROLES = ('radar', 'simulation', 'real')
 
 
@@ -77,20 +77,26 @@ class SignalWakeup:
 
 
 class CommittedSignalNotifier:
-    """Wake once per committed symbol/candle/side, avoiding a tick wake storm."""
+    """Wake on committed signal transitions, including reactivation.
+
+    This is scheduling only. It never resets the detector's first-signal clock,
+    authorizes an order or changes notice/order deduplication.
+    """
     def __init__(self,database,*,factory=SignalWakeup):
         self.readers=[factory(database,role) for role in ROLES]
-        self.seen=OrderedDict();self.notifications=0
+        self.active=OrderedDict();self.notifications=0
 
     def after_commit(self,snapshots):
         changed=False
         for symbol,payload in snapshots.items():
             signal=payload.get('signal')
-            if payload.get('reason')!='EXIT' or not signal:continue
+            if payload.get('reason')!='EXIT' or not signal:
+                self.active.pop(symbol,None)
+                continue
             key=(symbol,signal['candle'],signal['side'])
-            if key in self.seen:continue
-            self.seen[key]=True;changed=True
-            if len(self.seen)>2048:self.seen.popitem(last=False)
+            if self.active.get(symbol)==key:continue
+            self.active[symbol]=key;self.active.move_to_end(symbol);changed=True
+            if len(self.active)>2048:self.active.popitem(last=False)
         if changed:
             for reader in self.readers:reader.set()
             self.notifications+=1
