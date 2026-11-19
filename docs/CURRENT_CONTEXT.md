@@ -1,7 +1,7 @@
 # Continuidad actual de JJTrade AI
 
-Actualizado 2026-11-18T19:01:07.706977-05:00. Guardado en GitHub solicitado por el usuario; publicacion
-pendiente de comprobacion del SHA remoto. Ver GITHUB_CHECKPOINT_2026-11-18.md.
+Actualizado 2026-11-18T19:01:07.706977-05:00. Guardado en GitHub completado: codigo 058d5cc39364e08b0ab544d66db7560cb7a1281f
+publicado en main y SHA remoto verificado 2026-11-18T19:06:32.427023-05:00. Ver GITHUB_CHECKPOINT_2026-11-18.md.
 El contexto operativo extenso anterior y los diarios siguen conservados localmente,
 con respaldo privado exports/trade_review/2026-11-18_github_checkpoint/.
 No publicar credenciales, cuentas, operaciones, estados cifrados o bases de la VPS.
@@ -51,6 +51,6 @@ Diarios docs/SESSION_STATE_*.md ignorados; conservan continuidad operativa priva
 ## Siguiente paso
 
 Validacion del checkpoint completada:172pruebas dirigidas OK49.838s,
-17modulos. Revision por patrones sin hallazgos en seleccion. Crear commit,
-publicar main y comprobar SHA remoto. No activar radar, enviar ordenes,
+17modulos. Revision por patrones sin hallazgos y diffcheck limpio.
+Codigo publicado y SHA remoto comprobado; conservar este recibo documental. No activar radar, enviar ordenes,
 probar Telegram ni reiniciar servicios como parte del guardado.

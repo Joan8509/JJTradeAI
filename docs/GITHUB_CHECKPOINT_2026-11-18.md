@@ -31,3 +31,10 @@ El contexto publicado es un resumen saneado, no una copia completa de la VPS.
 No se reinician servicios, arman colas, envian ordenes o mensajes como parte de
 este guardado. Los registros de carga anteriores no prueban salud actual.
 Publicacion pendiente hasta verificar HEAD igual a refs/heads/main remoto.
+
+## Publicacion verificada
+
+2026-11-18T19:06:32.427023-05:00: codigo publicado en main, commit 058d5cc39364e08b0ab544d66db7560cb7a1281f.
+Consulta directa de refs/heads/main confirma igualdad con HEAD local.
+52archivos incluidos;172pruebas dirigidas aprobadas. Este recibo se guarda
+en un commit documental posterior. Sin reinicios, ordenes ni mensajes.
